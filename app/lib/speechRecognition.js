@@ -31,16 +31,18 @@ export function initSpeechRecognition(options = {}) {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   
   if (!SpeechRecognition) {
+    console.log('Speech recognition not supported in this browser');
     return null;
   }
 
   // Create a new recognition instance
   recognitionInstance = new SpeechRecognition();
   
-  // Configure the recognition instance
+  // Configure the recognition instance with more robust settings
   recognitionInstance.continuous = config.continuous;
   recognitionInstance.interimResults = config.interimResults;
   recognitionInstance.lang = config.lang;
+  recognitionInstance.maxAlternatives = 1;
   
   // Set up event handlers
   recognitionInstance.onresult = (event) => {
@@ -65,8 +67,49 @@ export function initSpeechRecognition(options = {}) {
   };
   
   recognitionInstance.onerror = (event) => {
-    console.error('Speech recognition error:', event.error);
-    config.onError(event);
+    console.log('Speech recognition error details:', {
+      error: event.error,
+      message: event.message,
+      type: event.type
+    });
+    
+    // Handle specific error types better
+    switch (event.error) {
+      case 'network':
+        // Network errors are often temporary - don't show to user unless persistent
+        console.warn('Speech recognition network error - this is usually temporary');
+        // Don't call onError for network errors as they're often false positives
+        break;
+      case 'not-allowed':
+        config.onError({
+          ...event,
+          userMessage: 'Microphone permission denied. Please allow microphone access and try again.'
+        });
+        break;
+      case 'no-speech':
+        // Don't treat no-speech as an error - just log it
+        console.log('No speech detected');
+        break;
+      case 'audio-capture':
+        config.onError({
+          ...event,
+          userMessage: 'No microphone found. Please check your microphone connection.'
+        });
+        break;
+      case 'service-not-allowed':
+        config.onError({
+          ...event,
+          userMessage: 'Speech recognition service not allowed. Please check your browser settings.'
+        });
+        break;
+      default:
+        // Only show generic errors for unknown types
+        console.log('Speech recognition error:', event.error);
+        config.onError({
+          ...event,
+          userMessage: `Speech recognition error: ${event.error}`
+        });
+    }
   };
   
   recognitionInstance.onend = () => {
@@ -75,7 +118,27 @@ export function initSpeechRecognition(options = {}) {
   };
   
   recognitionInstance.onstart = () => {
-    console.log('Speech recognition started');
+    console.log('Speech recognition started successfully');
+  };
+  
+  recognitionInstance.onnomatch = () => {
+    console.log('No speech match found');
+  };
+  
+  recognitionInstance.onsoundstart = () => {
+    console.log('Sound detected');
+  };
+  
+  recognitionInstance.onsoundend = () => {
+    console.log('Sound ended');
+  };
+  
+  recognitionInstance.onspeechstart = () => {
+    console.log('Speech started');
+  };
+  
+  recognitionInstance.onspeechend = () => {
+    console.log('Speech ended');
   };
   
   return recognitionInstance;
@@ -101,7 +164,17 @@ export function startSpeechRecognition() {
     
     // Small delay to ensure previous instance is fully stopped
     setTimeout(() => {
-      recognitionInstance.start();
+      try {
+        recognitionInstance.start();
+        console.log('Speech recognition start requested');
+      } catch (startError) {
+        console.error('Error starting speech recognition:', startError);
+        // Try to recover by creating a new instance
+        if (startError.name === 'InvalidStateError') {
+          console.log('Attempting to recover from InvalidStateError');
+          // The recognition is already started, so we don't need to do anything
+        }
+      }
     }, 100);
     
     return true;

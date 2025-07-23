@@ -17,6 +17,8 @@ export default function Recorder({ question, onFeedback }) {
   const [feedback, setFeedback] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [retryCount, setRetryCount] = useState(0);
+  const [microphoneReady, setMicrophoneReady] = useState(false);
   const { user } = useAuth();
 
   // Initialize speech recognition
@@ -52,30 +54,44 @@ export default function Recorder({ question, onFeedback }) {
           },
           onError: (event) => {
             console.error('Speech recognition error:', event.error, event);
-            let errorMessage = '';
             
+            // Check if it's a user-friendly error message
+            if (event.userMessage) {
+              setError(event.userMessage);
+              setRecording(false);
+              return;
+            }
+            
+            // Handle specific error types
             switch (event.error) {
               case 'no-speech':
-                errorMessage = 'No speech detected. Please try speaking again.';
+                // Don't show error for no-speech, just log it
+                console.log('No speech detected - waiting for speech...');
                 break;
               case 'audio-capture':
-                errorMessage = 'Microphone not available. Please check your microphone connection.';
+                setError('Microphone not available. Please check your microphone connection.');
+                setRecording(false);
                 break;
               case 'not-allowed':
-                errorMessage = 'Microphone access denied. Please allow microphone permissions.';
+                setError('Microphone access denied. Please allow microphone permissions and refresh the page.');
+                setRecording(false);
                 break;
               case 'network':
-                errorMessage = 'Network error. Please check your internet connection.';
+                // Network errors are often false positives - don't show them unless persistent
+                console.warn('Speech recognition network error (often temporary)');
+                break;
+              case 'service-not-allowed':
+                setError('Speech recognition service not available. Please try again or use a different browser.');
+                setRecording(false);
                 break;
               case 'aborted':
                 // Don't show error for intentional stops
-                return;
+                console.log('Speech recognition aborted');
+                break;
               default:
-                errorMessage = `Microphone error: ${event.error}. Please try again.`;
+                console.log('Speech recognition error:', event.error);
+                // Don't show generic errors to avoid confusing users
             }
-            
-            setError(errorMessage);
-            setRecording(false);
           }
         });
         
@@ -83,6 +99,7 @@ export default function Recorder({ question, onFeedback }) {
           setError("Failed to initialize speech recognition. Please refresh the page.");
         } else {
           console.log('Speech recognition initialized successfully');
+          setMicrophoneReady(true);
         }
         
       } catch (permissionError) {
@@ -105,6 +122,7 @@ export default function Recorder({ question, onFeedback }) {
     setTranscript("");
     setFeedback(null);
     setError("");
+    setRetryCount(0);
     
     setRecording(true);
     
@@ -113,6 +131,24 @@ export default function Recorder({ question, onFeedback }) {
       setRecording(false);
     } else {
       console.log('Speech recognition started successfully');
+    }
+  };
+
+  const retryRecording = () => {
+    if (retryCount < 3) {
+      setRetryCount(prev => prev + 1);
+      setError("");
+      console.log(`Retrying speech recognition (attempt ${retryCount + 1})`);
+      
+      setTimeout(() => {
+        if (!startSpeechRecognition()) {
+          setError("Failed to restart speech recognition. Please try again.");
+          setRecording(false);
+        }
+      }, 1000);
+    } else {
+      setError("Unable to start speech recognition after multiple attempts. Please refresh the page.");
+      setRecording(false);
     }
   };
 
@@ -174,12 +210,25 @@ export default function Recorder({ question, onFeedback }) {
       </div>
       
       <div className="space-y-4">
+        {/* Microphone Status */}
+        <div className="text-center p-2">
+          {microphoneReady ? (
+            <div className="text-green-600 text-sm">
+              🎤 Microphone ready
+            </div>
+          ) : (
+            <div className="text-yellow-600 text-sm">
+              🎤 Setting up microphone...
+            </div>
+          )}
+        </div>
+
         <div className="flex space-x-4">
           <button
             onClick={startRecording}
-            disabled={recording || loading}
+            disabled={recording || loading || !microphoneReady}
             className={`flex-1 py-3 px-4 rounded-lg font-medium transition-colors ${
-              recording || loading
+              recording || loading || !microphoneReady
                 ? "bg-gray-300 text-gray-500 cursor-not-allowed"
                 : "bg-green-600 hover:bg-green-700 text-white"
             }`}
@@ -201,8 +250,18 @@ export default function Recorder({ question, onFeedback }) {
         </div>
         
         {error && (
-          <div className="text-red-500 text-sm p-2 bg-red-50 dark:bg-red-900/30 rounded">
-            {error}
+          <div className="p-3 bg-red-50 dark:bg-red-900/30 rounded-lg">
+            <div className="text-red-500 text-sm mb-2">
+              {error}
+            </div>
+            {retryCount < 3 && (
+              <button
+                onClick={retryRecording}
+                className="text-sm bg-red-100 hover:bg-red-200 text-red-700 px-3 py-1 rounded"
+              >
+                Retry ({3 - retryCount} attempts left)
+              </button>
+            )}
           </div>
         )}
         
