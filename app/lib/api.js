@@ -166,8 +166,8 @@ export async function extractSkills(formData) {
       headers: {
         // Let axios set the Content-Type automatically for FormData
         // This ensures proper boundary is set for multipart/form-data
-      },
-      timeout: 30000 // 30 seconds for file upload
+      }
+      // No timeout - let it take as long as needed
     });
     
     const result = response.data;
@@ -226,7 +226,7 @@ export async function extractSkills(formData) {
 export async function generateQuestions(data) {
   // Ensure we have required data
   const skills = data?.skills || [];
-  const questionCount = data?.question_count || 5; 
+  const questionCount = data?.question_count || config.api.defaultQuestionCount || 5; 
   const cvData = data?.cv_data || {};
   
   if (skills.length === 0) {
@@ -247,26 +247,40 @@ export async function generateQuestions(data) {
   
   // Make direct axios request to generate-questions API
   const response = await axios.post(`${apiUrl}/generate-questions`, requestData, {
-    headers: { 'Content-Type': 'application/json' },
-    timeout: 15000  // 15 seconds timeout
+    headers: { 'Content-Type': 'application/json' }
+    // No timeout - let it take as long as needed for AI processing
   });
 
   const result = response.data;
   console.log('Question generation response:', result);
   
-  // Validate API response
-  if (!result || !result.questions || !Array.isArray(result.questions)) {
-    throw new Error('Invalid response format from generate-questions API. Expected: {questions: []}');
+  // Handle different response formats from the backend
+  let questionsList = [];
+  
+  if (result && result.questions && Array.isArray(result.questions)) {
+    // Handle nested format: { questions: [{ questions: [...] }] }
+    if (result.questions.length > 0 && result.questions[0].questions && Array.isArray(result.questions[0].questions)) {
+      questionsList = result.questions[0].questions;
+    } else {
+      questionsList = result.questions;
+    }
+  } else if (Array.isArray(result)) {
+    questionsList = result;
+  } else {
+    throw new Error('Invalid response format from generate-questions API. Expected questions array.');
   }
   
-  if (result.questions.length === 0) {
-    throw new Error('API returned no questions. Please check your skills and CV data.');
+  // Filter out error responses
+  questionsList = questionsList.filter(q => !q.error);
+  
+  if (questionsList.length === 0) {
+    throw new Error('API returned no valid questions. Please check your skills and CV data.');
   }
   
-  logger.info('Successfully generated questions:', result.questions.length, 'questions');
+  logger.info('Successfully generated questions:', questionsList.length, 'questions');
   
   // Process and standardize question format
-  const processedQuestions = result.questions.map((q, index) => ({
+  const processedQuestions = questionsList.map((q, index) => ({
     id: q.id || `q${index+1}`,
     type: (q.questionType || q.type || "technical").toLowerCase().replace(/\s+/g, '-'),
     difficulty: q.difficulty || "medium",
@@ -301,8 +315,8 @@ export async function getVerbalFeedback(questionText, voiceConvertedToText) {
     
     // Use axios for the request
     const response = await axios.post(`${apiUrl}/verbal-feedback`, requestData, {
-      headers: { 'Content-Type': 'application/json' },
-      timeout: 15000  // 15 seconds timeout for feedback analysis
+      headers: { 'Content-Type': 'application/json' }
+      // No timeout - let it take as long as needed for AI analysis
     });
     
     const result = response.data;

@@ -11,6 +11,7 @@ export default function Dashboard() {
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState("upload");
   const [skills, setSkills] = useState([]);
+  const [questions, setQuestions] = useState([]);
   const [showInterview, setShowInterview] = useState(false);
   
   if (!user) {
@@ -34,6 +35,16 @@ export default function Dashboard() {
     setSkills(extractedSkills);
     // Show success message and enable interview tab
     console.log("Skills extracted:", extractedSkills);
+  };
+
+  const handleQuestionsGenerated = (generatedQuestions) => {
+    setQuestions(generatedQuestions);
+    console.log("Questions generated:", generatedQuestions);
+  };
+
+  const handleStartInterview = (interviewQuestions) => {
+    setQuestions(interviewQuestions);
+    setShowInterview(true);
   };
 
   const handleInterviewComplete = () => {
@@ -158,13 +169,15 @@ export default function Dashboard() {
           {activeTab === "interview" && !showInterview && (
             <QuestionList 
               skills={skills}
-              onStartInterview={() => setShowInterview(true)}
+              questionCount={5}
+              onQuestionsGenerated={handleQuestionsGenerated}
+              onStartInterview={handleStartInterview}
             />
           )}
           
           {activeTab === "interview" && showInterview && (
             <InterviewSession
-              skills={skills}
+              questions={questions}
               onComplete={handleInterviewComplete}
               onBack={() => setShowInterview(false)}
             />

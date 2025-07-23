@@ -35,9 +35,14 @@ const config = {
     useMockDataFallback: false,
     
     /**
-     * Timeout for API requests in milliseconds
+     * Default number of questions to generate per session
      */
-    timeout: 30000,
+    defaultQuestionCount: 5,
+
+    /**
+     * No timeout for API requests - let them take as long as needed
+     */
+    timeout: 0,
   },
   
   /**

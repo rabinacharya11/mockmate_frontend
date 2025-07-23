@@ -8,7 +8,13 @@ import LoadingState from "./LoadingState";
 import ErrorDisplay from "./ErrorDisplay";
 import InterviewSession from "./InterviewSession";
 
-export default function QuestionList({ skills = [], questionCount = 6, onQuestionSelected }) {
+export default function QuestionList({ 
+  skills = [], 
+  questionCount = 5, 
+  onQuestionSelected,
+  onQuestionsGenerated,
+  onStartInterview 
+}) {
   const [questions, setQuestions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -111,6 +117,11 @@ export default function QuestionList({ skills = [], questionCount = 6, onQuestio
       
       setQuestions(validatedQuestions);
 
+      // Notify parent component about generated questions
+      if (onQuestionsGenerated) {
+        onQuestionsGenerated(validatedQuestions);
+      }
+
       // Store questions in Firestore
       await updateDoc(userRef, { 
         questions: validatedQuestions,
@@ -160,7 +171,11 @@ export default function QuestionList({ skills = [], questionCount = 6, onQuestio
   };
 
   const startInterview = () => {
-    setViewMode("interview");
+    if (onStartInterview) {
+      onStartInterview(questions);
+    } else {
+      setViewMode("interview");
+    }
     setError("");
   };
 

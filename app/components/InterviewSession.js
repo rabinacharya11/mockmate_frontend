@@ -2,7 +2,7 @@
 import { useState, useEffect } from "react";
 import { useAuth } from "../context/AuthContext";
 import { db } from "../lib/firebase";
-import { doc, updateDoc, arrayUnion } from "firebase/firestore";
+import { doc, updateDoc, arrayUnion, collection, addDoc, setDoc } from "firebase/firestore";
 import { getVerbalFeedback } from "../lib/api";
 import { 
   initSpeechRecognition, 
@@ -12,6 +12,9 @@ import {
 } from "../lib/speechRecognition";
 
 export default function InterviewSession({ questions = [], onComplete, onBack }) {
+  // Ensure we always have exactly 5 questions
+  const sessionQuestions = questions.slice(0, 5);
+  
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [recording, setRecording] = useState(false);
   const [transcript, setTranscript] = useState("");
@@ -21,10 +24,11 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
   const [error, setError] = useState("");
   const [interviewComplete, setInterviewComplete] = useState(false);
   const [allFeedback, setAllFeedback] = useState([]);
+  const [sessionStartTime] = useState(new Date());
   const { user } = useAuth();
 
-  const currentQuestion = questions[currentQuestionIndex];
-  const isLastQuestion = currentQuestionIndex === questions.length - 1;
+  const currentQuestion = sessionQuestions[currentQuestionIndex];
+  const isLastQuestion = currentQuestionIndex === sessionQuestions.length - 1;
 
   // Initialize speech recognition
   useEffect(() => {
@@ -209,15 +213,52 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
       const answersWithFeedback = await Promise.all(feedbackPromises);
       setAllFeedback(answersWithFeedback);
 
-      // Store in Firebase
+      // Calculate session metrics
+      const sessionEndTime = new Date();
+      const sessionDuration = Math.round((sessionEndTime - sessionStartTime) / 1000); // in seconds
+      
+      const sessionMetrics = {
+        totalQuestions: sessionQuestions.length,
+        totalAnswers: answersWithFeedback.length,
+        averageClarity: answersWithFeedback.reduce((sum, a) => sum + (a.feedback?.clarity_score || 0), 0) / answersWithFeedback.length,
+        averageSentiment: answersWithFeedback.reduce((sum, a) => sum + (a.feedback?.sentiment?.compound || 0), 0) / answersWithFeedback.length,
+        totalFillerWords: answersWithFeedback.reduce((sum, a) => {
+          const fillerCount = Object.values(a.feedback?.filler_words || {}).reduce((total, count) => total + count, 0);
+          return sum + fillerCount;
+        }, 0),
+        sessionDuration: sessionDuration
+      };
+
+      // Create detailed session document
+      const sessionData = {
+        sessionId: `session_${Date.now()}`,
+        userId: user.uid,
+        createdAt: sessionStartTime,
+        completedAt: sessionEndTime,
+        duration: sessionDuration,
+        questions: sessionQuestions,
+        answers: answersWithFeedback,
+        metrics: sessionMetrics,
+        status: 'completed',
+        questionCount: sessionQuestions.length
+      };
+
+      // Store session in dedicated subcollection for better querying
       if (user) {
-        await updateDoc(doc(db, "users", user.uid), {
-          interviewSessions: arrayUnion({
-            questions,
-            answers: answersWithFeedback,
-            completedAt: new Date().toISOString(),
-            sessionId: Date.now().toString()
-          })
+        const userRef = doc(db, "users", user.uid);
+        const sessionsRef = collection(userRef, "interviewSessions");
+        await addDoc(sessionsRef, sessionData);
+        
+        // Also update user document with latest session summary
+        await updateDoc(userRef, {
+          lastInterviewSession: {
+            completedAt: sessionEndTime,
+            sessionId: sessionData.sessionId,
+            questionCount: sessionQuestions.length,
+            averageClarity: sessionMetrics.averageClarity,
+            averageSentiment: sessionMetrics.averageSentiment
+          },
+          totalInterviewSessions: (user.totalInterviewSessions || 0) + 1
         });
       }
 

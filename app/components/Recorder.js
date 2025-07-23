@@ -21,82 +21,106 @@ export default function Recorder({ question, onFeedback }) {
 
   // Initialize speech recognition
   useEffect(() => {
+    console.log('Initializing speech recognition...');
+    
     if (!isSpeechRecognitionSupported()) {
       setError("Speech recognition is not supported in your browser. Please use Chrome, Edge, or Safari.");
       return;
     }
 
-    // Initialize speech recognition with our custom handler
-    const recognition = initSpeechRecognition({
-      continuous: true,
-      interimResults: true,
-      lang: "en-US",
-      onResult: ({ finalTranscript, interimTranscript }) => {
-        if (finalTranscript) {
-          setTranscript(prev => prev + finalTranscript);
-        }
-      },
-      onError: (event) => {
-        console.error('Speech recognition error:', event.error);
-        let errorMessage = '';
+    // Request microphone permissions upfront
+    const requestMicrophonePermission = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        console.log('Microphone permission granted');
+        stream.getTracks().forEach(track => track.stop()); // Release immediately
         
-        switch (event.error) {
-          case 'no-speech':
-            errorMessage = 'No speech detected. Please try speaking again.';
-            break;
-          case 'audio-capture':
-            errorMessage = 'Microphone not available. Please check your microphone connection.';
-            break;
-          case 'not-allowed':
-            errorMessage = 'Microphone access denied. Please allow microphone permissions.';
-            break;
-          case 'network':
-            errorMessage = 'Network error. Please check your internet connection.';
-            break;
-          default:
-            errorMessage = `Microphone error: ${event.error}. Please try again.`;
+        // Initialize speech recognition after permission is granted
+        const recognition = initSpeechRecognition({
+          continuous: true,
+          interimResults: true,
+          lang: "en-US",
+          onResult: ({ finalTranscript, interimTranscript }) => {
+            console.log('Speech result:', { finalTranscript, interimTranscript });
+            if (finalTranscript) {
+              setTranscript(prev => {
+                const newTranscript = prev + finalTranscript;
+                console.log('Updated transcript:', newTranscript);
+                return newTranscript;
+              });
+            }
+          },
+          onError: (event) => {
+            console.error('Speech recognition error:', event.error, event);
+            let errorMessage = '';
+            
+            switch (event.error) {
+              case 'no-speech':
+                errorMessage = 'No speech detected. Please try speaking again.';
+                break;
+              case 'audio-capture':
+                errorMessage = 'Microphone not available. Please check your microphone connection.';
+                break;
+              case 'not-allowed':
+                errorMessage = 'Microphone access denied. Please allow microphone permissions.';
+                break;
+              case 'network':
+                errorMessage = 'Network error. Please check your internet connection.';
+                break;
+              case 'aborted':
+                // Don't show error for intentional stops
+                return;
+              default:
+                errorMessage = `Microphone error: ${event.error}. Please try again.`;
+            }
+            
+            setError(errorMessage);
+            setRecording(false);
+          }
+        });
+        
+        if (!recognition) {
+          setError("Failed to initialize speech recognition. Please refresh the page.");
+        } else {
+          console.log('Speech recognition initialized successfully');
         }
         
-        setError(errorMessage);
-        setRecording(false);
+      } catch (permissionError) {
+        console.error('Microphone permission error:', permissionError);
+        setError("Microphone access denied. Please allow microphone permissions in your browser settings and refresh the page.");
       }
-    });
-    
-    if (!recognition) {
-      setError("Failed to initialize speech recognition. Please refresh the page.");
-    }
+    };
+
+    requestMicrophonePermission();
     
     // Cleanup
     return () => {
+      console.log('Cleaning up speech recognition');
       stopSpeechRecognition();
     };
   }, []);
 
   const startRecording = async () => {
+    console.log('Starting recording...');
     setTranscript("");
     setFeedback(null);
     setError("");
-    
-    // Check for microphone permissions first
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      stream.getTracks().forEach(track => track.stop()); // Release the stream immediately
-    } catch (permissionError) {
-      setError("Microphone access denied. Please allow microphone permissions and try again.");
-      return;
-    }
     
     setRecording(true);
     
     if (!startSpeechRecognition()) {
       setError("Failed to start speech recognition. Please refresh and try again.");
       setRecording(false);
+    } else {
+      console.log('Speech recognition started successfully');
     }
   };
 
   const stopRecording = () => {
+    console.log('Stopping recording...');
     setRecording(false);
     stopSpeechRecognition();
+    console.log('Recording stopped');
   };
 
   const sendForFeedback = async () => {
