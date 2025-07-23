@@ -178,24 +178,42 @@ export default function Recorder({ question, onFeedback }) {
         audioChunks.push(event.data);
       };
       
-      recorder.onstop = () => {
+      recorder.onstop = async () => {
         const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
         console.log('🎵 Audio recorded, blob size:', audioBlob.size);
         
-        // Clear any recording status messages
-        setError("");
-        setTranscript("Audio recorded successfully! Please use the 'Text Answer' tab above to type your response for analysis.");
+        setError("🔄 Transcribing your audio with AssemblyAI... Please wait...");
         
-        // Automatically switch to text mode for convenience
-        setTimeout(() => {
-          setInputMode("text");
-        }, 2000);
+        try {
+          // Send audio to our transcription API
+          const formData = new FormData();
+          formData.append('audio', audioBlob, 'recording.wav');
+          
+          const response = await fetch('/api/transcribe', {
+            method: 'POST',
+            body: formData,
+          });
+          
+          const result = await response.json();
+          
+          if (result.transcript && result.transcript.trim()) {
+            setTranscript(result.transcript);
+            setError("✅ Transcription completed! Your answer has been converted to text.");
+            console.log('✅ Transcription successful:', result.transcript);
+          } else {
+            setError("❌ Transcription failed. Please try recording again or use the 'Text Answer' mode.");
+            console.error('❌ Transcription failed:', result);
+          }
+        } catch (transcriptionError) {
+          console.error('❌ Transcription error:', transcriptionError);
+          setError("❌ Failed to transcribe audio. Please check your internet connection and try again, or use the 'Text Answer' mode.");
+        }
       };
       
       setMediaRecorder(recorder);
       recorder.start();
       setIsRecording(true);
-      setError("🎤 Recording audio... When done, click 'Stop Recording' and then switch to 'Text Answer' mode to type your response.");
+      setError("🎤 Recording audio... Click 'Stop Recording' when finished, and we'll automatically transcribe it using AssemblyAI!");
       
     } catch (err) {
       console.error('❌ MediaRecorder failed:', err);
@@ -415,7 +433,9 @@ export default function Recorder({ question, onFeedback }) {
               {/* Recording Info */}
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
                 <p className="text-blue-800 text-sm">
-                  🎤 <strong>Voice Recording:</strong> Click "Start Recording" to record your answer. After recording, you'll be prompted to type your response in the "Text Answer" section for analysis.
+                  🎤 <strong>Voice Recording with AI Transcription:</strong> Click "Start Recording" to record your answer. We'll automatically transcribe it using AssemblyAI's advanced speech-to-text technology!
+                  <br/>
+                  ✨ <strong>How it works:</strong> Record → Stop → Auto-transcribe → Review → Submit for feedback
                 </p>
               </div>
 
