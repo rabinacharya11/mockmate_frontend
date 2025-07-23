@@ -65,7 +65,17 @@ export function initSpeechRecognition(options = {}) {
   };
   
   recognitionInstance.onerror = (event) => {
+    console.error('Speech recognition error:', event.error);
     config.onError(event);
+  };
+  
+  recognitionInstance.onend = () => {
+    console.log('Speech recognition ended');
+    // Don't restart automatically to avoid issues
+  };
+  
+  recognitionInstance.onstart = () => {
+    console.log('Speech recognition started');
   };
   
   return recognitionInstance;
@@ -77,11 +87,23 @@ export function initSpeechRecognition(options = {}) {
  */
 export function startSpeechRecognition() {
   if (!recognitionInstance) {
+    console.error('Recognition instance not initialized');
     return false;
   }
   
   try {
-    recognitionInstance.start();
+    // Stop any existing recognition first
+    try {
+      recognitionInstance.stop();
+    } catch (e) {
+      // Ignore error if already stopped
+    }
+    
+    // Small delay to ensure previous instance is fully stopped
+    setTimeout(() => {
+      recognitionInstance.start();
+    }, 100);
+    
     return true;
   } catch (error) {
     console.error('Failed to start speech recognition:', error);

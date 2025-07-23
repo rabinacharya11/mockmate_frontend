@@ -1,13 +1,13 @@
 import { useState, useEffect } from "react";
 import { db } from "../lib/firebase";
-import { doc, updateDoc, getDoc } from "firebase/firestore";
+import { doc, updateDoc, getDoc, setDoc } from "firebase/firestore";
 import { useAuth } from "../context/AuthContext";
 import { extractSkills } from "../lib/api";
 import LoadingState from "./LoadingState";
 import ErrorDisplay from "./ErrorDisplay";
 import { logger } from "../lib/config";
 
-export default function CVUpload({ onSkillsExtracted }) {
+export default function CVUpload({ onSkillsExtracted, onStartInterview }) {
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -23,14 +23,28 @@ export default function CVUpload({ onSkillsExtracted }) {
       try {
         const userRef = doc(db, "users", user.uid);
         const userSnap = await getDoc(userRef);
-        const data = userSnap.data();
         
-        if (data && data.skills && data.skills.length > 0) {
-          setExistingSkills(data.skills);
-          // If the user already has skills, call the callback
-          onSkillsExtracted && onSkillsExtracted(data.skills);
+        if (userSnap.exists()) {
+          const data = userSnap.data();
+          if (data && data.skills && data.skills.length > 0) {
+            setExistingSkills(data.skills);
+            // If the user already has skills, call the callback
+            onSkillsExtracted && onSkillsExtracted(data.skills);
+          }
+        } else {
+          // Create user document if it doesn't exist
+          await setDoc(userRef, {
+            email: user.email,
+            displayName: user.displayName,
+            photoURL: user.photoURL,
+            createdAt: new Date(),
+            skills: [],
+            cv_data: {}
+          });
+          console.log('Created new user document for:', user.email);
         }
       } catch (err) {
+        console.error("Error checking existing skills:", err);
         logger.error("Error checking existing skills:", err);
       }
     };
@@ -40,15 +54,23 @@ export default function CVUpload({ onSkillsExtracted }) {
 
   const handleFileChange = (e) => {
     const selectedFile = e.target.files[0];
-    if (selectedFile && 
-        (selectedFile.type === "application/pdf" || 
-         selectedFile.type === "application/msword" || 
-         selectedFile.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document")) {
-      setFile(selectedFile);
-      setError("");
-    } else {
-      setFile(null);
-      setError("Please select a valid document (PDF, DOC, DOCX)");
+    if (selectedFile) {
+      // Check file type
+      const validTypes = [
+        "application/pdf",
+        "application/msword", 
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      ];
+      
+      if (validTypes.includes(selectedFile.type)) {
+        setFile(selectedFile);
+        setError("");
+        console.log('Valid file selected:', selectedFile.name, selectedFile.type);
+      } else {
+        setFile(null);
+        setError("Please select a valid document (PDF, DOC, DOCX)");
+        console.log('Invalid file type:', selectedFile.type);
+      }
     }
   };
 
@@ -66,6 +88,7 @@ export default function CVUpload({ onSkillsExtracted }) {
     
     setLoading(true);
     setError("");
+    setSuccess(false);
     
     try {
       console.log('Creating FormData with file:', file.name, file.type, file.size);
@@ -77,31 +100,65 @@ export default function CVUpload({ onSkillsExtracted }) {
         console.log(`FormData contains: ${key} = ${value instanceof File ? value.name : value}`);
       }
 
+      console.log('Calling extractSkills API...');
       const data = await extractSkills(formData);
-      console.log('Skills extracted:', data);
+      console.log('Skills extracted successfully:', data);
 
       if (!data || !data.skills || data.skills.length === 0) {
         throw new Error("Could not extract skills from the CV. Please try a different document.");
       }
 
-      // Store in Firestore
-      await updateDoc(doc(db, "users", user.uid), {
+      // Ensure user document exists before updating
+      const userRef = doc(db, "users", user.uid);
+      const userSnap = await getDoc(userRef);
+      
+      const updateData = {
         cv_data: data.cv_data || {},
         skills: data.skills || [],
-        updatedAt: new Date(),
-      });
+        lastUpdated: new Date(),
+        fileName: file.name,
+        uploadTimestamp: new Date()
+      };
 
+      if (userSnap.exists()) {
+        await updateDoc(userRef, updateData);
+      } else {
+        // Create the document with all necessary fields
+        await setDoc(userRef, {
+          email: user.email,
+          displayName: user.displayName,
+          photoURL: user.photoURL,
+          createdAt: new Date(),
+          ...updateData
+        });
+      }
+
+      console.log('User data updated in Firestore');
+      
+      setExistingSkills(data.skills);
       setSuccess(true);
       setFile(null);
+      
       // Call the callback with the extracted skills
       onSkillsExtracted && onSkillsExtracted(data.skills);
+      
+      // Auto-clear success message after 3 seconds
+      setTimeout(() => setSuccess(false), 3000);
+      
     } catch (err) {
       console.error("Error uploading CV:", err);
+      
+      let errorMessage = "Failed to upload CV. ";
+      
       if (err.message.includes("NetworkError") || err.message.includes("Failed to fetch")) {
-        setError("Network error. Please check your connection and ensure the API server is running.");
+        errorMessage += "Network error. Please check your connection and ensure the API server is running.";
+      } else if (err.message.includes("Cannot connect to API server")) {
+        errorMessage += "Cannot connect to the API server. Please ensure the backend is running on localhost:8000.";
       } else {
-        setError(`Failed to upload CV: ${err.message}`);
+        errorMessage += err.message;
       }
+      
+      setError(errorMessage);
     } finally {
       setLoading(false);
     }
@@ -122,7 +179,22 @@ export default function CVUpload({ onSkillsExtracted }) {
               </span>
             ))}
           </div>
-          <p className="text-sm mt-2">You can continue with these skills or upload a new CV.</p>
+          <div className="flex items-center justify-between mt-4">
+            <p className="text-sm">You can continue with these skills or upload a new CV.</p>
+            <button
+              onClick={() => {
+                if (typeof onStartInterview === 'function') {
+                  onStartInterview();
+                } else {
+                  // Fallback to using the custom event
+                  window.dispatchEvent(new CustomEvent('startInterview'));
+                }
+              }}
+              className="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded-lg transition-colors text-sm font-medium"
+            >
+              Start Interview Now →
+            </button>
+          </div>
         </div>
       )}
       
@@ -135,48 +207,68 @@ export default function CVUpload({ onSkillsExtracted }) {
           </svg>
           <h3 className="text-lg font-medium mb-2">CV Uploaded Successfully!</h3>
           <p className="mb-4">Your skills have been extracted and you can now proceed to interview practice.</p>
-          <button 
-            onClick={() => setSuccess(false)} 
-            className="bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded-lg transition-colors"
-          >
-            Upload Another CV
-          </button>
+          <div className="flex flex-col sm:flex-row justify-center gap-3">
+            <button 
+              onClick={() => setSuccess(false)} 
+              className="bg-gray-500 hover:bg-gray-600 text-white py-2 px-4 rounded-lg transition-colors"
+            >
+              Upload Another CV
+            </button>
+            <button
+              onClick={() => {
+                if (typeof onStartInterview === 'function') {
+                  onStartInterview();
+                } else {
+                  // Fallback to using the custom event
+                  window.dispatchEvent(new CustomEvent('startInterview'));
+                }
+              }}
+              className="bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded-lg transition-colors flex items-center justify-center"
+            >
+              Start Interview Now
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 ml-2" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M10.293 5.293a1 1 0 011.414 0l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414-1.414L12.586 11H5a1 1 0 110-2h7.586l-2.293-2.293a1 1 0 010-1.414z" clipRule="evenodd" />
+              </svg>
+            </button>
+          </div>
         </div>
       ) : (
         <div className="space-y-6">
           <div className="border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-8 text-center">
-            <input
-              type="file"
-              id="cv-upload"
-              onChange={handleFileChange}
-              className="hidden"
-              accept=".pdf,.doc,.docx"
-            />
-            <label
-              htmlFor="cv-upload"
-              className="cursor-pointer flex flex-col items-center justify-center"
-            >
-              <svg 
-                xmlns="http://www.w3.org/2000/svg" 
-                className="h-16 w-16 text-gray-400 mb-4" 
-                fill="none" 
-                viewBox="0 0 24 24" 
-                stroke="currentColor"
+            <div className="relative">
+              <input
+                type="file"
+                id="cv-upload"
+                onChange={handleFileChange}
+                className="opacity-0 absolute inset-0 w-full h-full cursor-pointer z-10"
+                accept=".pdf,.doc,.docx"
+              />
+              <label
+                htmlFor="cv-upload"
+                className="cursor-pointer flex flex-col items-center justify-center"
               >
-                <path 
-                  strokeLinecap="round" 
-                  strokeLinejoin="round" 
-                  strokeWidth={2} 
-                  d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" 
-                />
-              </svg>
-              <p className="text-gray-600 dark:text-gray-300 mb-2 text-lg">
-                {file ? file.name : "Click to upload your CV"}
-              </p>
-              <p className="text-sm text-gray-500 dark:text-gray-400">
-                PDF, DOC, or DOCX formats (Max 5MB)
-              </p>
-            </label>
+                <svg 
+                  xmlns="http://www.w3.org/2000/svg" 
+                  className="h-16 w-16 text-gray-400 mb-4" 
+                  fill="none" 
+                  viewBox="0 0 24 24" 
+                  stroke="currentColor"
+                >
+                  <path 
+                    strokeLinecap="round" 
+                    strokeLinejoin="round" 
+                    strokeWidth={2} 
+                    d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" 
+                  />
+                </svg>
+                <p className="text-gray-600 dark:text-gray-300 mb-2 text-lg font-semibold">
+                  {file ? file.name : "Click or drag to upload your CV"}
+                </p>
+                <p className="text-sm text-gray-500 dark:text-gray-400">
+                  PDF, DOC, or DOCX formats (Max 5MB)
+                </p>
+              </label>
+            </div>
           </div>
           
           {error && (
@@ -187,10 +279,10 @@ export default function CVUpload({ onSkillsExtracted }) {
             />
           )}
           
-          <div className="flex justify-center">
+          <div className="flex justify-center space-x-4">
             <button
               onClick={handleUpload}
-              disabled={!file}
+              disabled={!file || loading}
               className={`py-3 px-8 rounded-lg font-medium transition-colors ${
                 !file
                   ? "bg-gray-300 text-gray-500 cursor-not-allowed"

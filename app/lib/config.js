@@ -7,19 +7,32 @@ const config = {
   /**
    * API Settings
    */
+  /**
+   * API Configuration
+   */
   api: {
     /**
-     * Base URL for API requests
-     * Set to null to use the NEXT_PUBLIC_API_URL environment variable
+     * Base URL for the FastAPI backend
+     * Using Next.js API proxy routes to avoid CORS issues
      */
-    baseUrl: null,
+    baseUrl: "/api/proxy",
+    
+    /**
+     * Alternative API URLs to try if the main one fails
+     * Using direct FastAPI endpoints as fallback
+     */
+    alternativeUrls: [
+      "http://localhost:8000",
+      "http://127.0.0.1:8000",
+      "http://0.0.0.0:8000"
+    ],
     
     /**
      * Whether to use mock data when API calls fail
      * Set to true to enable fallback to mock data
      * Set to false to show actual errors
      */
-    useMockDataFallback: true,
+    useMockDataFallback: false,
     
     /**
      * Timeout for API requests in milliseconds

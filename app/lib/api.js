@@ -1,5 +1,6 @@
 "use client";
 import config, { logger } from './config';
+import axios from 'axios';  // Import axios at the top
 
 /**
  * Helper function to make API calls to the backend
@@ -8,39 +9,143 @@ import config, { logger } from './config';
  * @returns {Promise<object>} - The JSON response from the API
  */
 export async function apiCall(endpoint, options = {}) {
-  // Determine API URL from config or environment variable
-  const apiUrl = config.api.baseUrl || process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-  const url = `${apiUrl}${endpoint.startsWith('/') ? endpoint : '/' + endpoint}`;
+  // Determine API URL from config or environment variable - ensure default is FastAPI backend
+  const mainApiUrl = config.api.baseUrl || process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
   
-  // Don't set Content-Type for FormData as it sets its own with boundary
-  const isFormData = options.body instanceof FormData;
-  const headers = isFormData ? {} : { 'Content-Type': 'application/json', ...options.headers };
+  // Get alternative URLs to try if the main one fails
+  const alternativeUrls = config.api.alternativeUrls || ["http://127.0.0.1:8000", "http://0.0.0.0:8000"];
   
-  try {
-    logger.info(`Making ${options.method || 'GET'} request to ${endpoint}`);
+  // Add the main URL at the beginning of the array of URLs to try
+  const urlsToTry = [mainApiUrl, ...alternativeUrls];
+  
+  // To track all errors for better reporting
+  const errors = [];
+  
+  // Try each URL in succession
+  for (let i = 0; i < urlsToTry.length; i++) {
+    const apiUrl = urlsToTry[i];
+    const url = `${apiUrl}${endpoint.startsWith('/') ? endpoint : '/' + endpoint}`;
+    const isLastAttempt = i === urlsToTry.length - 1;
     
-    // Set up request with timeout
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), config.api.timeout);
+    // Log the full URL being called for debugging
+    logger.debug(`Trying API URL (${i+1}/${urlsToTry.length}): ${url}`);
     
-    const response = await fetch(url, {
-      method: options.method || 'GET',
-      headers: headers,
-      body: options.body,
-      signal: controller.signal
-    });
+    // Don't set Content-Type for FormData as it sets its own with boundary
+    const isFormData = options.body instanceof FormData;
+    const headers = isFormData ? {} : { 'Content-Type': 'application/json', ...options.headers };
     
-    clearTimeout(timeoutId);
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`API call failed: ${response.status} ${response.statusText} - ${errorText}`);
+    try {
+      logger.info(`Making ${options.method || 'GET'} request to ${endpoint} via ${apiUrl}`);
+      
+      // Log request body for debugging (but don't log large files in FormData)
+      if (!isFormData && options.body) {
+        logger.debug(`Request body: ${options.body.substring(0, 500)}${options.body.length > 500 ? '...' : ''}`);
+      }
+      
+      // Set up request with timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), config.api.timeout);
+      
+      // Log before fetch attempt to help with debugging
+      console.log(`Attempting to fetch from ${url}`);
+      
+      const response = await fetch(url, {
+        method: options.method || 'GET',
+        headers: headers,
+        body: options.body,
+        signal: controller.signal,
+        // Using 'omit' for simplicity in testing, can be changed to 'same-origin' if needed
+        credentials: 'omit',
+        // Add mode: 'cors' to explicitly enable CORS
+        mode: 'cors'
+      });
+      
+      clearTimeout(timeoutId);
+      
+      // Log response status and headers for debugging
+      logger.debug(`Response status: ${response.status} ${response.statusText}`);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        logger.error(`API error response: ${errorText}`);
+        throw new Error(`API call failed: ${response.status} ${response.statusText} - ${errorText}`);
+      }
+      
+      const responseData = await response.json();
+      logger.debug(`Response data: ${JSON.stringify(responseData).substring(0, 500)}...`);
+      
+      // Successfully received a response, return it
+      return responseData;
+    } catch (error) {
+      // Store the error for this attempt
+      errors.push({
+        url: apiUrl,
+        error: error.message
+      });
+      
+      // Log the error but don't throw it yet if we have more URLs to try
+      logger.warn(`Error connecting to ${apiUrl}: ${error.message}`);
+      
+      // Only throw if this is the last URL to try
+      if (isLastAttempt) {
+        // Check if it's a timeout error
+        if (error.name === 'AbortError') {
+          logger.error(`All API endpoints timed out for ${endpoint}`);
+          const timeoutError = new Error(`API call timed out. Please try again later.`);
+          timeoutError.error = {
+            type: 'Timeout',
+            details: `The server did not respond within ${config.api.timeout/1000} seconds`,
+            endpoint,
+            attempts: errors
+          };
+          throw timeoutError;
+        }
+        
+        // Handle network errors specially
+        if (error.message && error.message.includes('fetch')) {
+          const networkError = new Error(`Network error when connecting to the API. Please check your internet connection and ensure the backend server is running.`);
+          networkError.error = {
+            type: 'Network',
+            details: 'Could not reach any server. This could be due to connectivity issues, CORS configuration, or the server not running.',
+            attempts: errors
+          };
+          logger.error(`All API endpoints failed for ${endpoint}`, errors);
+          
+          // Add extra console logging for easier debugging
+          console.error(`Network error details:`, {
+            endpoints: errors.map(e => e.url),
+            errors: errors.map(e => e.error)
+          });
+          
+          // If we're in development mode, provide more helpful guidance
+          if (process.env.NODE_ENV === 'development') {
+            console.info(`
+              Debugging tips for "Failed to fetch" errors:
+              1. Ensure your FastAPI backend is running at one of these URLs: ${urlsToTry.join(', ')}
+              2. Check CORS configuration in your FastAPI app
+              3. Check for network connectivity issues
+              4. Verify that the endpoint ${endpoint} exists on your server
+            `);
+          }
+          
+          throw networkError;
+        }
+        
+        // Generic error for other types of failures
+        const genericError = new Error(`API call failed after trying multiple endpoints: ${error.message}`);
+        genericError.error = {
+          type: 'API Error',
+          details: `Error occurred while calling ${endpoint}`,
+          attempts: errors
+        };
+        logger.error(`API call error for ${endpoint}:`, error);
+        throw genericError;
+      }
+      
+      // If not the last attempt, continue to the next URL
+      logger.info(`Trying next API URL for ${endpoint}`);
+      continue;
     }
-    
-    return await response.json();
-  } catch (error) {
-    logger.error(`Error calling ${endpoint}:`, error);
-    throw error;
   }
 }
 
@@ -50,52 +155,66 @@ export async function apiCall(endpoint, options = {}) {
  * @returns {Promise<object>} - The extracted CV data and skills
  */
 export async function extractSkills(formData) {
-  logger.info('Extracting skills from CV');
+  logger.info('Extracting skills from CV using extract-skills/ endpoint');
+  
+  const apiUrl = config.api.baseUrl || "/api/proxy";
+  
+  console.log('Making API request to:', `${apiUrl}/extract-skills`);
   
   try {
-    // Try to call the real API first
-    return await apiCall('extract-skills', {
-      method: 'POST',
-      body: formData,
+    const response = await axios.post(`${apiUrl}/extract-skills`, formData, {
+      headers: {
+        // Let axios set the Content-Type automatically for FormData
+        // This ensures proper boundary is set for multipart/form-data
+      },
+      timeout: 30000 // 30 seconds for file upload
     });
-  } catch (error) {
-    logger.warn('API call failed, using mock data instead:', error);
     
-    // Only use mock data if the fallback is enabled
-    if (!config.api.useMockDataFallback) {
-      throw error;
+    const result = response.data;
+    console.log('API response received:', result);
+    
+    // Validate the response format according to API specification
+    if (!result || !result.skills || !result.cv_data) {
+      throw new Error('Invalid response format from extract-skills API. Expected: {skills: [], cv_data: {}}');
     }
     
-    // Get the file name from the FormData for a more realistic mock
-    const file = formData.get('file');
-    const fileName = file ? file.name : 'unknown.pdf';
+    if (!Array.isArray(result.skills) || result.skills.length === 0) {
+      throw new Error('No skills found in the CV. Please ensure your CV contains clear skill information.');
+    }
     
-    logger.info('Using mock data for CV extraction');
+    logger.info('Successfully extracted skills:', result.skills.length, 'skills found');
+    return result;
     
-    // Return realistic mock data
-    return {
-      cv_data: {
-        name: "John Doe",
-        email: "john@example.com",
-        phone: "+1234567890",
-        experience: [
-          {
-            title: "Software Engineer",
-            company: "Tech Company",
-            duration: "2020-2023"
-          }
-        ],
-        education: [
-          {
-            degree: "Bachelor of Science in Computer Science",
-            institution: "University",
-            year: "2020"
-          }
-        ],
-        filename: fileName
-      },
-      skills: ["JavaScript", "React", "Node.js", "Python", "Machine Learning", "Data Analysis", "Communication"]
-    };
+  } catch (error) {
+    console.error('Extract skills API error:', error);
+    
+    // Handle different types of errors
+    if (error.code === 'ECONNREFUSED') {
+      throw new Error('Cannot connect to API server. Please ensure the FastAPI backend is running on localhost:8000');
+    }
+    
+    if (error.code === 'ECONNABORTED') {
+      throw new Error('Request timed out. The file might be too large or the server is slow to respond.');
+    }
+    
+    if (error.message === 'Network Error') {
+      throw new Error('Network Error: This is likely a CORS issue. Please ensure your FastAPI backend has CORS enabled for http://localhost:3000');
+    }
+    
+    if (error.response?.status === 422) {
+      throw new Error('Invalid file format. Please upload a valid PDF file.');
+    }
+    
+    if (error.response?.status === 500) {
+      const detail = error.response.data?.detail || 'Internal server error';
+      if (detail.includes('PDF processing failed')) {
+        throw new Error('PDF processing failed. Please ensure you upload a valid PDF file, not a text file.');
+      }
+      throw new Error(`Server error: ${detail}`);
+    }
+    
+    // Re-throw the original error if we can't handle it specifically
+    throw new Error(`CV extraction failed: ${error.message}`);
   }
 }
 
@@ -105,69 +224,61 @@ export async function extractSkills(formData) {
  * @returns {Promise<object>} - The generated questions
  */
 export async function generateQuestions(data) {
-  try {
-    // Try to call the real API first
-    return await apiCall('generate-questions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    });
-  } catch (error) {
-    console.warn('API call failed, using mock data instead:', error);
-    
-    // If the API call fails, use mock data based on the provided skills
-    const skills = data.skills || [];
-    const questionCount = data.question_count || 5;
-    
-    // Generate mock questions based on skills
-    const questions = [];
-    const questionTypes = [
-      { type: "technical", weight: 0.5 },
-      { type: "behavioral", weight: 0.3 },
-      { type: "situational", weight: 0.2 }
-    ];
-    
-    for (let i = 0; i < questionCount; i++) {
-      // Pick a random skill
-      const skill = skills[Math.floor(Math.random() * skills.length)];
-      
-      // Pick a question type based on weights
-      const rand = Math.random();
-      let typeIndex = 0;
-      let cumulativeWeight = questionTypes[0].weight;
-      
-      while (rand > cumulativeWeight && typeIndex < questionTypes.length - 1) {
-        typeIndex++;
-        cumulativeWeight += questionTypes[typeIndex].weight;
-      }
-      
-      const questionType = questionTypes[typeIndex].type;
-      
-      // Generate a question based on skill and type
-      let question = {
-        id: `q${i+1}`,
-        type: questionType,
-        difficulty: ["easy", "medium", "hard"][Math.floor(Math.random() * 3)],
-        questionText: "",
-        instruction: ""
-      };
-      
-      if (questionType === "technical") {
-        question.questionText = `Explain how you have used ${skill} in your previous projects.`;
-        question.instruction = `Focus on specific examples and technical details related to ${skill}.`;
-      } else if (questionType === "behavioral") {
-        question.questionText = `Describe a situation where you had to apply your knowledge of ${skill} to solve a problem.`;
-        question.instruction = `Use the STAR method: Situation, Task, Action, Result.`;
-      } else {
-        question.questionText = `If you were faced with a project requiring ${skill}, how would you approach it?`;
-        question.instruction = `Consider both technical implementation and project management aspects.`;
-      }
-      
-      questions.push(question);
-    }
-    
-    return { questions };
+  // Ensure we have required data
+  const skills = data?.skills || [];
+  const questionCount = data?.question_count || 5; 
+  const cvData = data?.cv_data || {};
+  
+  if (skills.length === 0) {
+    throw new Error('No skills provided for question generation. Please upload and extract skills from your CV first.');
   }
+  
+  // Get API URL from config
+  const apiUrl = config.api.baseUrl || "/api/proxy";
+  
+  // Format request data according to API specification
+  const requestData = {
+    cv_data: typeof cvData === 'string' ? cvData : JSON.stringify(cvData),
+    skills: skills,
+    question_count: questionCount
+  };
+
+  console.log('Generating questions with data:', requestData);
+  
+  // Make direct axios request to generate-questions API
+  const response = await axios.post(`${apiUrl}/generate-questions`, requestData, {
+    headers: { 'Content-Type': 'application/json' },
+    timeout: 15000  // 15 seconds timeout
+  });
+
+  const result = response.data;
+  console.log('Question generation response:', result);
+  
+  // Validate API response
+  if (!result || !result.questions || !Array.isArray(result.questions)) {
+    throw new Error('Invalid response format from generate-questions API. Expected: {questions: []}');
+  }
+  
+  if (result.questions.length === 0) {
+    throw new Error('API returned no questions. Please check your skills and CV data.');
+  }
+  
+  logger.info('Successfully generated questions:', result.questions.length, 'questions');
+  
+  // Process and standardize question format
+  const processedQuestions = result.questions.map((q, index) => ({
+    id: q.id || `q${index+1}`,
+    type: (q.questionType || q.type || "technical").toLowerCase().replace(/\s+/g, '-'),
+    difficulty: q.difficulty || "medium",
+    questionText: q.questionText || q.question || q.text || `Question ${index+1}`,
+    instruction: q.instruction || q.instructions || ""
+  }));
+  
+  return {
+    questions: processedQuestions.slice(0, questionCount),
+    source: 'API',
+    generated: new Date().toISOString()
+  };
 }
 
 /**
@@ -178,92 +289,62 @@ export async function generateQuestions(data) {
  */
 export async function getVerbalFeedback(questionText, voiceConvertedToText) {
   try {
-    // Try to call the real API first
-    return await apiCall('verbal-feedback', {
-      method: 'POST',
+    logger.info('Getting verbal feedback from FastAPI backend');
+    
+    // Format request data according to API specification
+    const requestData = {
+      question: questionText,
+      answer: voiceConvertedToText
+    };
+    
+    const apiUrl = config.api.baseUrl || "/api/proxy";
+    
+    // Use axios for the request
+    const response = await axios.post(`${apiUrl}/verbal-feedback`, requestData, {
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify([{ questionText, voiceConvertedToText }]),
-    });
-  } catch (error) {
-    console.warn('API call failed, using mock data instead:', error);
-    
-    // Calculate mock sentiment based on keywords in the answer
-    const positiveWords = ['good', 'great', 'excellent', 'best', 'effective', 'success', 'achieved', 'accomplished'];
-    const negativeWords = ['bad', 'difficult', 'problem', 'challenge', 'hard', 'fail', 'issue', 'trouble'];
-    const fillerWords = ['um', 'uh', 'like', 'you know', 'so', 'well', 'actually'];
-    
-    const words = voiceConvertedToText.toLowerCase().split(/\s+/);
-    
-    // Count positive, negative words
-    let posCount = 0;
-    let negCount = 0;
-    
-    words.forEach(word => {
-      if (positiveWords.some(pw => word.includes(pw))) posCount++;
-      if (negativeWords.some(nw => word.includes(nw))) negCount++;
+      timeout: 15000  // 15 seconds timeout for feedback analysis
     });
     
-    const totalWords = words.length;
-    const pos = totalWords > 0 ? posCount / totalWords * 2 : 0.5;
-    const neg = totalWords > 0 ? negCount / totalWords * 2 : 0.1;
-    const neu = 1 - (pos + neg);
+    const result = response.data;
     
-    // Count filler words
-    const fillerWordCounts = {};
-    fillerWords.forEach(fw => {
-      const regex = new RegExp(`\\b${fw}\\b`, 'gi');
-      const count = (voiceConvertedToText.match(regex) || []).length;
-      fillerWordCounts[fw] = count;
-    });
-    
-    // Calculate clarity score based on filler word ratio
-    const totalFillerWords = Object.values(fillerWordCounts).reduce((a, b) => a + b, 0);
-    const fillerRatio = totalWords > 0 ? totalFillerWords / totalWords : 0;
-    const clarityScore = Math.max(0.3, Math.min(0.95, 1 - fillerRatio * 2));
-    
-    // Generate overall feedback
-    let overallFeedback = '';
-    
-    if (clarityScore > 0.8) {
-      overallFeedback += "Your answer was clear and well-articulated. ";
-    } else if (clarityScore > 0.5) {
-      overallFeedback += "Your answer was generally clear, but try to reduce filler words. ";
-    } else {
-      overallFeedback += "Your answer could be clearer. Try to reduce filler words and organize your thoughts. ";
-    }
-    
-    if (pos > 0.3) {
-      overallFeedback += "You conveyed a positive tone, which is good. ";
-    }
-    
-    if (totalWords < 50) {
-      overallFeedback += "Consider providing more detail in your answer. ";
-    } else if (totalWords > 200) {
-      overallFeedback += "Your answer was comprehensive, but try to be more concise. ";
-    } else {
-      overallFeedback += "Your answer had a good length. ";
-    }
-    
-    if (totalFillerWords > 5) {
-      overallFeedback += "Watch out for filler words which can distract from your message. ";
-    }
-    
-    return {
-      feedback: [
-        {
+    // Validate response format according to API specification
+    if (result && (result.sentiment || result.clarity_score !== undefined || result.overall_feedback)) {
+      // Convert to standardized format for the frontend
+      return {
+        feedback: [{
           question: questionText,
           answer: voiceConvertedToText,
-          sentiment: {
-            pos: Math.min(1, Math.max(0, pos)),
-            neg: Math.min(1, Math.max(0, neg)),
-            neu: Math.min(1, Math.max(0, neu)),
-            compound: Math.min(1, Math.max(-1, pos - neg))
-          },
-          clarity_score: clarityScore,
-          filler_words: fillerWordCounts,
-          overall_feedback: overallFeedback
-        }
-      ]
-    };
+          sentiment: result.sentiment || { pos: 0.5, neg: 0.1, neu: 0.4, compound: 0.4 },
+          clarity_score: result.clarity_score || 0.7,
+          filler_words: result.filler_words || {},
+          overall_feedback: result.overall_feedback || "Thank you for your answer."
+        }]
+      };
+    } else {
+      logger.warn('Verbal feedback API returned unexpected format');
+      throw new Error('Invalid response format from verbal feedback API');
+    }
+  } catch (error) {
+    logger.error('Verbal feedback API failed:', error.message);
+    
+    // Check for specific error types and provide helpful error messages
+    if (error.code === 'ECONNREFUSED' || error.message.includes('Network Error')) {
+      throw new Error('Cannot connect to API server. Please ensure the backend is running on localhost:8000');
+    }
+    
+    if (error.code === 'ECONNABORTED') {
+      throw new Error('Request timed out. Please try again.');
+    }
+    
+    if (error.response?.status === 422) {
+      throw new Error('Invalid data format. Please check your question and answer data.');
+    }
+    
+    if (error.response?.status === 500) {
+      throw new Error('Server error occurred during feedback analysis. Please try again.');
+    }
+    
+    // Re-throw the error to force the frontend to handle it
+    throw new Error(`Verbal feedback failed: ${error.message}`);
   }
 }

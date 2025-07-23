@@ -22,26 +22,49 @@ export default function Recorder({ question, onFeedback }) {
   // Initialize speech recognition
   useEffect(() => {
     if (!isSpeechRecognitionSupported()) {
-      setError("Speech recognition is not supported in your browser.");
+      setError("Speech recognition is not supported in your browser. Please use Chrome, Edge, or Safari.");
       return;
     }
 
     // Initialize speech recognition with our custom handler
-    initSpeechRecognition({
+    const recognition = initSpeechRecognition({
       continuous: true,
       interimResults: true,
       lang: "en-US",
-      onResult: ({ finalTranscript }) => {
+      onResult: ({ finalTranscript, interimTranscript }) => {
         if (finalTranscript) {
           setTranscript(prev => prev + finalTranscript);
         }
       },
       onError: (event) => {
-        console.error('Speech recognition error', event.error);
-        setError(`Microphone error: ${event.error}`);
+        console.error('Speech recognition error:', event.error);
+        let errorMessage = '';
+        
+        switch (event.error) {
+          case 'no-speech':
+            errorMessage = 'No speech detected. Please try speaking again.';
+            break;
+          case 'audio-capture':
+            errorMessage = 'Microphone not available. Please check your microphone connection.';
+            break;
+          case 'not-allowed':
+            errorMessage = 'Microphone access denied. Please allow microphone permissions.';
+            break;
+          case 'network':
+            errorMessage = 'Network error. Please check your internet connection.';
+            break;
+          default:
+            errorMessage = `Microphone error: ${event.error}. Please try again.`;
+        }
+        
+        setError(errorMessage);
         setRecording(false);
       }
     });
+    
+    if (!recognition) {
+      setError("Failed to initialize speech recognition. Please refresh the page.");
+    }
     
     // Cleanup
     return () => {
@@ -49,10 +72,20 @@ export default function Recorder({ question, onFeedback }) {
     };
   }, []);
 
-  const startRecording = () => {
+  const startRecording = async () => {
     setTranscript("");
     setFeedback(null);
     setError("");
+    
+    // Check for microphone permissions first
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach(track => track.stop()); // Release the stream immediately
+    } catch (permissionError) {
+      setError("Microphone access denied. Please allow microphone permissions and try again.");
+      return;
+    }
+    
     setRecording(true);
     
     if (!startSpeechRecognition()) {
