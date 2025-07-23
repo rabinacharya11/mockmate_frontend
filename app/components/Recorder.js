@@ -4,183 +4,257 @@ import { useAuth } from "../context/AuthContext";
 import { db } from "../lib/firebase";
 import { doc, updateDoc, arrayUnion } from "firebase/firestore";
 import { getVerbalFeedback } from "../lib/api";
-import { 
-  initSpeechRecognition, 
-  startSpeechRecognition, 
-  stopSpeechRecognition,
-  isSpeechRecognitionSupported
-} from "../lib/speechRecognition";
 
 export default function Recorder({ question, onFeedback }) {
-  const [recording, setRecording] = useState(false);
-  const [transcript, setTranscript] = useState("");
-  const [interimTranscript, setInterimTranscript] = useState("");
   const [manualText, setManualText] = useState("");
   const [inputMode, setInputMode] = useState("voice"); // "voice" or "text"
   const [feedback, setFeedback] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [isRecording, setIsRecording] = useState(false);
+  const [transcript, setTranscript] = useState("");
+  const [recognitionInstance, setRecognitionInstance] = useState(null);
+  const [browserSupported, setBrowserSupported] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
-  const [microphoneReady, setMicrophoneReady] = useState(false);
+  const [mediaRecorder, setMediaRecorder] = useState(null);
+  const [audioStream, setAudioStream] = useState(null);
+  const [useWebSpeechAPI, setUseWebSpeechAPI] = useState(false); // Start with false to avoid network issues
   const { user } = useAuth();
 
-  // Initialize speech recognition
+  // Initialize Speech Recognition
   useEffect(() => {
-    console.log('Initializing speech recognition...');
-    
-    if (!isSpeechRecognitionSupported()) {
-      setError("Speech recognition is not supported in your browser. Please use Chrome, Edge, or Safari.");
-      return;
-    }
-
-    // Request microphone permissions upfront
-    const requestMicrophonePermission = async () => {
+    const initializeSpeechRecognition = () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        console.log('Microphone permission granted');
-        stream.getTracks().forEach(track => track.stop()); // Release immediately
+        // Check if we're in browser environment
+        if (typeof window === 'undefined') {
+          console.log('❌ Not in browser environment');
+          return;
+        }
+
+        // Check for speech recognition support
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+          setError("Speech recognition is not supported in your browser. Please use Chrome, Edge, or Safari.");
+          return;
+        }
+
+        setBrowserSupported(true);
+        console.log('✅ Speech recognition supported');
+
+        // Create speech recognition instance
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
         
-        // Initialize speech recognition after permission is granted
-        const recognition = initSpeechRecognition({
-          continuous: true,
-          interimResults: true,
-          lang: "en-US",
-          onResult: ({ finalTranscript, interimTranscript }) => {
-            console.log('Speech result received:', { 
-              final: finalTranscript, 
-              interim: interimTranscript,
-              finalLength: finalTranscript.length,
-              interimLength: interimTranscript.length
-            });
+        // Add more configuration to handle network issues
+        recognition.maxAlternatives = 1;
+        
+        let finalTranscript = '';
+        let isManualStop = false;
+        
+        recognition.onresult = (event) => {
+          let interimTranscript = '';
+          
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const transcriptPart = event.results[i][0].transcript;
             
-            // Update interim transcript for live display
-            if (interimTranscript) {
-              setInterimTranscript(interimTranscript);
-            }
-            
-            // Add final transcript to the accumulated transcript
-            if (finalTranscript) {
-              setTranscript(prev => {
-                const newTranscript = prev + finalTranscript;
-                console.log('Updated accumulated transcript:', newTranscript);
-                return newTranscript;
-              });
-              // Clear interim transcript when we get final results
-              setInterimTranscript("");
-            }
-          },
-          onError: (event) => {
-            console.error('Speech recognition error:', event.error, event);
-            
-            // Check if it's a user-friendly error message
-            if (event.userMessage) {
-              setError(event.userMessage);
-              setRecording(false);
-              return;
-            }
-            
-            // Handle specific error types
-            switch (event.error) {
-              case 'no-speech':
-                // Don't show error for no-speech, just log it
-                console.log('No speech detected - waiting for speech...');
-                break;
-              case 'audio-capture':
-                setError('Microphone not available. Please check your microphone connection.');
-                setRecording(false);
-                break;
-              case 'not-allowed':
-                setError('Microphone access denied. Please allow microphone permissions and refresh the page.');
-                setRecording(false);
-                break;
-              case 'network':
-                // Network errors are often false positives - don't show them unless persistent
-                console.warn('Speech recognition network error (often temporary)');
-                break;
-              case 'service-not-allowed':
-                setError('Speech recognition service not available. Please try again or use a different browser.');
-                setRecording(false);
-                break;
-              case 'aborted':
-                // Don't show error for intentional stops
-                console.log('Speech recognition aborted');
-                break;
-              default:
-                console.log('Speech recognition error:', event.error);
-                // Don't show generic errors to avoid confusing users
+            if (event.results[i].isFinal) {
+              finalTranscript += transcriptPart + ' ';
+              console.log('🎯 Final transcription:', transcriptPart);
+            } else {
+              interimTranscript += transcriptPart;
+              console.log('📝 Interim transcription:', transcriptPart);
             }
           }
-        });
+          
+          // Update state with combined transcript
+          setTranscript(finalTranscript + interimTranscript);
+        };
         
-        if (!recognition) {
-          setError("Failed to initialize speech recognition. Please refresh the page.");
-        } else {
-          console.log('Speech recognition initialized successfully');
-          setMicrophoneReady(true);
-        }
+        recognition.onerror = (event) => {
+          console.error('❌ Speech Recognition Error:', event.error);
+          
+          // If network error, switch to MediaRecorder fallback
+          if (event.error === 'network' && retryCount >= 2) {
+            console.log('🔄 Switching to MediaRecorder fallback due to network issues');
+            setUseWebSpeechAPI(false);
+            setError("Speech recognition service unavailable. Using local recording mode.");
+            return;
+          }
+          
+          // Handle different types of errors
+          switch (event.error) {
+            case 'network':
+              setError("Network error occurred. Please check your internet connection and try again.");
+              break;
+            case 'not-allowed':
+              setError("Microphone access denied. Please allow microphone access and try again.");
+              break;
+            case 'no-speech':
+              setError("No speech detected. Please try speaking again.");
+              break;
+            case 'audio-capture':
+              setError("Audio capture failed. Please check your microphone and try again.");
+              break;
+            case 'service-not-allowed':
+              setError("Speech recognition service not allowed. Please try again.");
+              break;
+            default:
+              setError(`Speech recognition error: ${event.error}. Please try again.`);
+          }
+          
+          setIsRecording(false);
+        };
         
-      } catch (permissionError) {
-        console.error('Microphone permission error:', permissionError);
-        setError("Microphone access denied. Please allow microphone permissions in your browser settings and refresh the page.");
+        recognition.onstart = () => {
+          console.log('🚀 Speech recognition started');
+          setError(""); // Clear any previous errors
+          isManualStop = false;
+        };
+        
+        recognition.onend = () => {
+          console.log('🛑 Speech recognition ended');
+          setIsRecording(false);
+          
+          // If it ended unexpectedly (not manually stopped), try to restart
+          if (!isManualStop && isRecording) {
+            console.log('🔄 Recognition ended unexpectedly, attempting restart...');
+            setTimeout(() => {
+              if (isRecording) {
+                try {
+                  recognition.start();
+                } catch (err) {
+                  console.error('❌ Failed to restart recognition:', err);
+                  setError("Speech recognition stopped unexpectedly. Please try again.");
+                  setIsRecording(false);
+                }
+              }
+            }, 1000);
+          }
+        };
+        
+        // Store the manual stop flag
+        recognition.manualStop = () => {
+          isManualStop = true;
+          recognition.stop();
+        };
+
+        setRecognitionInstance(recognition);
+        console.log('🚀 Speech recognition initialized successfully');
+
+      } catch (err) {
+        console.error('❌ Failed to initialize speech recognition:', err);
+        setError(`Failed to initialize speech recognition: ${err.message}`);
       }
     };
 
-    requestMicrophonePermission();
-    
-    // Cleanup
-    return () => {
-      console.log('Cleaning up speech recognition');
-      stopSpeechRecognition();
-    };
+    initializeSpeechRecognition();
   }, []);
 
   const startRecording = async () => {
-    console.log('Starting recording...');
-    setTranscript("");
-    setInterimTranscript("");
-    setFeedback(null);
-    setError("");
-    setRetryCount(0);
-    
-    setRecording(true);
-    
-    if (!startSpeechRecognition()) {
-      setError("Failed to start speech recognition. Please refresh and try again.");
-      setRecording(false);
-    } else {
-      console.log('Speech recognition started successfully');
+    console.log('🎬 Starting recording...');
+    try {
+      // Start with MediaRecorder to avoid network issues
+      return startMediaRecording();
+
+    } catch (err) {
+      console.error('❌ Error starting recording:', err);
+      setError(`Failed to start recording: ${err.message}`);
+      setIsRecording(false);
     }
   };
 
-  const retryRecording = () => {
-    if (retryCount < 3) {
-      setRetryCount(prev => prev + 1);
-      setError("");
-      console.log(`Retrying speech recognition (attempt ${retryCount + 1})`);
+  const startMediaRecording = async () => {
+    try {
+      console.log('🎤 Starting audio recording...');
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      setAudioStream(stream);
       
+      const recorder = new MediaRecorder(stream);
+      const audioChunks = [];
+      
+      recorder.ondataavailable = (event) => {
+        audioChunks.push(event.data);
+      };
+      
+      recorder.onstop = () => {
+        const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+        console.log('🎵 Audio recorded, blob size:', audioBlob.size);
+        
+        // Clear any recording status messages
+        setError("");
+        setTranscript("Audio recorded successfully! Please use the 'Text Answer' tab above to type your response for analysis.");
+        
+        // Automatically switch to text mode for convenience
+        setTimeout(() => {
+          setInputMode("text");
+        }, 2000);
+      };
+      
+      setMediaRecorder(recorder);
+      recorder.start();
+      setIsRecording(true);
+      setError("🎤 Recording audio... When done, click 'Stop Recording' and then switch to 'Text Answer' mode to type your response.");
+      
+    } catch (err) {
+      console.error('❌ MediaRecorder failed:', err);
+      if (err.name === 'NotAllowedError') {
+        setError("Microphone access denied. Please allow microphone access in your browser settings and try again, or use the 'Text Answer' mode.");
+      } else {
+        setError("Failed to access microphone. Please check your device settings and try using 'Text Answer' mode instead.");
+      }
+      setIsRecording(false);
+    }
+  };
+
+  const stopRecording = async () => {
+    console.log('🛑 Stopping recording...');
+    try {
+      // Stop MediaRecorder if being used
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+        if (audioStream) {
+          audioStream.getTracks().forEach(track => track.stop());
+          setAudioStream(null);
+        }
+        setMediaRecorder(null);
+        console.log('✅ MediaRecorder stopped');
+        setIsRecording(false);
+        return;
+      }
+
+      // Stop Web Speech API if being used
+      if (recognitionInstance) {
+        // Use manual stop to prevent auto-restart
+        if (recognitionInstance.manualStop) {
+          recognitionInstance.manualStop();
+        } else {
+          recognitionInstance.stop();
+        }
+        console.log('✅ Speech recognition stopped');
+      }
+
+      setIsRecording(false);
+      
+      // Wait a moment for final results
       setTimeout(() => {
-        if (!startSpeechRecognition()) {
-          setError("Failed to restart speech recognition. Please try again.");
-          setRecording(false);
+        if (transcript.trim()) {
+          console.log('🎯 Final transcript for feedback:', transcript.trim());
+          submitForFeedback(transcript.trim());
+        } else {
+          setError("No speech detected. Please try speaking again or use text input.");
         }
       }, 1000);
-    } else {
-      setError("Unable to start speech recognition after multiple attempts. Please refresh the page.");
-      setRecording(false);
+
+    } catch (err) {
+      console.error('❌ Error stopping recording:', err);
+      setError(`Failed to stop recording: ${err.message}`);
+      setIsRecording(false);
     }
   };
 
-  const stopRecording = () => {
-    console.log('Stopping recording...');
-    setRecording(false);
-    setInterimTranscript(""); // Clear interim text when stopping
-    stopSpeechRecognition();
-    console.log('Recording stopped');
-  };
-
-  const sendForFeedback = async () => {
-    const answerText = inputMode === "voice" ? transcript : manualText;
-    
+  const submitForFeedback = async (answerText) => {
     if (!answerText.trim()) {
       setError("No answer to analyze. Please provide your answer first.");
       return;
@@ -190,6 +264,11 @@ export default function Recorder({ question, onFeedback }) {
     setError("");
     
     try {
+      console.log('📤 Sending for feedback:', {
+        question: question.questionText,
+        answer: answerText
+      });
+      
       const data = await getVerbalFeedback(question.questionText, answerText);
       const feedbackData = data.feedback[0];
       setFeedback(feedbackData);
@@ -206,255 +285,260 @@ export default function Recorder({ question, onFeedback }) {
         });
       }
 
-      onFeedback && onFeedback(feedbackData);
+      if (onFeedback) {
+        onFeedback(feedbackData);
+      }
+
     } catch (err) {
-      console.error("Error getting feedback:", err);
-      setError("Failed to get feedback. Please try again.");
+      console.error('❌ Error getting feedback:', err);
+      setError(`Failed to get feedback: ${err.message}`);
     } finally {
       setLoading(false);
     }
   };
 
-  return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 w-full max-w-3xl mx-auto mt-6">
-      <h2 className="text-xl font-semibold mb-4 text-gray-800 dark:text-white">
-        Answer the Question
-      </h2>
-      
-      <div className="bg-gray-100 dark:bg-gray-700 p-4 rounded-lg mb-6">
-        <h3 className="font-medium text-gray-800 dark:text-white mb-2">
-          {question.questionText}
-        </h3>
-        <p className="text-sm text-gray-500 dark:text-gray-400">
-          {question.instruction}
-        </p>
-      </div>
-      
-      <div className="space-y-4">
-        {/* Input Mode Switcher */}
-        <div className="flex justify-center mb-4">
-          <div className="bg-gray-100 dark:bg-gray-700 rounded-lg p-1">
-            <button
-              onClick={() => setInputMode("voice")}
-              className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-                inputMode === "voice"
-                  ? "bg-white dark:bg-gray-800 text-blue-600 shadow"
-                  : "text-gray-600 dark:text-gray-400"
-              }`}
-            >
-              🎤 Voice Input
-            </button>
-            <button
-              onClick={() => setInputMode("text")}
-              className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-                inputMode === "text"
-                  ? "bg-white dark:bg-gray-800 text-blue-600 shadow"
-                  : "text-gray-600 dark:text-gray-400"
-              }`}
-            >
-              ✏️ Text Input
-            </button>
-          </div>
-        </div>
+  const handleTextSubmit = () => {
+    if (!manualText.trim()) {
+      setError("Please enter your answer first.");
+      return;
+    }
+    submitForFeedback(manualText.trim());
+  };
 
-        {inputMode === "voice" && (
-          <>
-            {/* Microphone Status */}
-            <div className="text-center p-2">
-              {microphoneReady ? (
-                <div className="text-green-600 text-sm">
-                  🎤 Microphone ready
-                </div>
-              ) : (
-                <div className="text-yellow-600 text-sm">
-                  🎤 Setting up microphone...
+  const clearFeedback = () => {
+    setFeedback(null);
+    setTranscript("");
+    setManualText("");
+    setError("");
+    setRetryCount(0);
+  };
+
+  const retryRecording = () => {
+    if (retryCount < 3) {
+      setRetryCount(prev => prev + 1);
+      setError("");
+      setTranscript("");
+      console.log(`🔄 Retrying recording (attempt ${retryCount + 1})`);
+      
+      setTimeout(() => {
+        startRecording();
+      }, 1000);
+    } else {
+      setError("Unable to start recording after multiple attempts. Please use the 'Text Answer' mode above.");
+    }
+  };
+
+  if (feedback) {
+    return (
+      <div className="space-y-6">
+        <div className="bg-gradient-to-r from-green-50 to-blue-50 border border-green-200 rounded-lg p-6">
+          <h3 className="text-lg font-semibold text-gray-800 mb-4">Interview Feedback</h3>
+          
+          <div className="space-y-4">
+            <div>
+              <h4 className="font-medium text-gray-700 mb-2">Overall Score</h4>
+              <div className="bg-white rounded-lg p-3 border">
+                <span className="text-2xl font-bold text-blue-600">{feedback.overallScore}/10</span>
+              </div>
+            </div>
+
+            <div>
+              <h4 className="font-medium text-gray-700 mb-2">Strengths</h4>
+              <div className="bg-white rounded-lg p-3 border">
+                <p className="text-gray-800">{feedback.strengths}</p>
+              </div>
+            </div>
+
+            <div>
+              <h4 className="font-medium text-gray-700 mb-2">Areas for Improvement</h4>
+              <div className="bg-white rounded-lg p-3 border">
+                <p className="text-gray-800">{feedback.improvements}</p>
+              </div>
+            </div>
+
+            <div>
+              <h4 className="font-medium text-gray-700 mb-2">Specific Feedback</h4>
+              <div className="bg-white rounded-lg p-3 border">
+                <p className="text-gray-800">{feedback.specificFeedback}</p>
+              </div>
+            </div>
+          </div>
+
+          <button
+            onClick={clearFeedback}
+            className="mt-6 w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition duration-200"
+          >
+            Continue to Next Question
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Input Mode Toggle */}
+      <div className="flex space-x-4 mb-6">
+        <button
+          onClick={() => setInputMode("voice")}
+          className={`flex-1 py-2 px-4 rounded-lg transition duration-200 ${
+            inputMode === "voice"
+              ? "bg-blue-600 text-white"
+              : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+          }`}
+        >
+          🎤 Voice Answer
+        </button>
+        <button
+          onClick={() => setInputMode("text")}
+          className={`flex-1 py-2 px-4 rounded-lg transition duration-200 ${
+            inputMode === "text"
+              ? "bg-blue-600 text-white"
+              : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+          }`}
+        >
+          ✍️ Text Answer
+        </button>
+      </div>
+
+      {/* Voice Input Mode */}
+      {inputMode === "voice" && (
+        <div className="space-y-4">
+          {!browserSupported ? (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+              <p className="text-red-700">
+                Speech recognition is not supported in your browser. Please use Chrome, Edge, or Safari.
+              </p>
+            </div>
+          ) : (
+            <>
+              {/* Recording Info */}
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
+                <p className="text-blue-800 text-sm">
+                  🎤 <strong>Voice Recording:</strong> Click "Start Recording" to record your answer. After recording, you'll be prompted to type your response in the "Text Answer" section for analysis.
+                </p>
+              </div>
+
+              {/* Recording Controls */}
+              <div className="flex justify-center space-x-4">
+                {!isRecording ? (
+                  <>
+                    <button
+                      onClick={startRecording}
+                      disabled={loading}
+                      className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-full transition duration-200 disabled:opacity-50"
+                    >
+                      🎤 Start Recording
+                    </button>
+                    {retryCount > 0 && retryCount < 3 && (
+                      <button
+                        onClick={retryRecording}
+                        disabled={loading}
+                        className="bg-yellow-600 hover:bg-yellow-700 text-white font-bold py-3 px-6 rounded-full transition duration-200 disabled:opacity-50"
+                      >
+                        🔄 Retry ({retryCount}/3)
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  <button
+                    onClick={stopRecording}
+                    className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-full transition duration-200 animate-pulse"
+                  >
+                    ⏹️ Stop Recording
+                  </button>
+                )}
+              </div>
+
+              {/* Live Transcript Display */}
+              {(isRecording || transcript) && (
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                  <h4 className="font-medium text-gray-700 mb-2">
+                    {isRecording ? "🎤 Live Transcription:" : "📝 Your Answer:"}
+                  </h4>
+                  <div className="bg-white rounded-lg p-3 border min-h-[100px]">
+                    <p className="text-gray-800 whitespace-pre-wrap">
+                      {transcript || "Speak to see your words appear here..."}
+                    </p>
+                  </div>
                 </div>
               )}
-            </div>
 
-            <div className="flex space-x-4">
-              <button
-                onClick={startRecording}
-                disabled={recording || loading || !microphoneReady}
-                className={`flex-1 py-3 px-4 rounded-lg font-medium transition-colors ${
-                  recording || loading || !microphoneReady
-                    ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                    : "bg-green-600 hover:bg-green-700 text-white"
-                }`}
-              >
-                {recording ? "Recording..." : "Start Recording"}
-              </button>
-              
-              <button
-                onClick={stopRecording}
-                disabled={!recording || loading}
-                className={`flex-1 py-3 px-4 rounded-lg font-medium transition-colors ${
-                  !recording || loading
-                    ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                    : "bg-red-600 hover:bg-red-700 text-white"
-                }`}
-              >
-                Stop Recording
-              </button>
-            </div>
-          </>
-        )}
+              {/* Submit Button for Voice Input */}
+              {transcript && !isRecording && (
+                <button
+                  onClick={() => submitForFeedback(transcript)}
+                  disabled={loading}
+                  className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg transition duration-200 disabled:opacity-50"
+                >
+                  {loading ? "Getting Feedback..." : "Get Feedback"}
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
-        {inputMode === "text" && (
-          <div className="space-y-4">
+      {/* Text Input Mode */}
+      {inputMode === "text" && (
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Type your answer:
+            </label>
             <textarea
               value={manualText}
               onChange={(e) => setManualText(e.target.value)}
-              placeholder="Type your answer here..."
-              className="w-full p-4 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white min-h-[120px] resize-vertical"
-              disabled={loading}
+              placeholder="Type your interview answer here..."
+              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              rows={6}
             />
-            <div className="text-sm text-gray-500">
-              Words: {manualText.trim().split(/\s+/).filter(word => word.length > 0).length}
-            </div>
           </div>
-        )}
-        
-        {error && (
-          <div className="p-3 bg-red-50 dark:bg-red-900/30 rounded-lg">
-            <div className="text-red-500 text-sm mb-2">
-              {error}
+          <button
+            onClick={handleTextSubmit}
+            disabled={loading || !manualText.trim()}
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg transition duration-200 disabled:opacity-50"
+          >
+            {loading ? "Getting Feedback..." : "Get Feedback"}
+          </button>
+        </div>
+      )}
+
+      {/* Error Display */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <div className="flex items-start justify-between">
+            <div className="flex-1">
+              <p className="text-red-700">{error}</p>
+              {retryCount > 0 && (
+                <p className="text-red-600 text-sm mt-1">
+                  Retry attempt: {retryCount}/3
+                </p>
+              )}
             </div>
-            {retryCount < 3 && (
+            {(error.includes('microphone') || error.includes('access')) && retryCount < 3 && (
               <button
                 onClick={retryRecording}
-                className="text-sm bg-red-100 hover:bg-red-200 text-red-700 px-3 py-1 rounded"
+                className="ml-4 px-3 py-1 bg-red-600 hover:bg-red-700 text-white text-sm rounded transition duration-200"
               >
-                Retry ({3 - retryCount} attempts left)
+                🔄 Retry
               </button>
             )}
           </div>
-        )}
-        {inputMode === "voice" && (
-          <div className="mt-4">
-            <h3 className="font-medium text-gray-800 dark:text-white mb-2">
-              Your Answer:
-              {recording && (
-                <span className="ml-2 text-sm text-green-600 animate-pulse">
-                  🎤 Listening...
-                </span>
-              )}
-            </h3>
-            <div className="bg-gray-50 dark:bg-gray-900 p-4 rounded-lg min-h-[100px] border border-gray-200 dark:border-gray-700">
-              {transcript || interimTranscript ? (
-                <div className="whitespace-pre-wrap">
-                  {/* Final transcript in normal text */}
-                  <span className="text-gray-900 dark:text-white">
-                    {transcript}
-                  </span>
-                  {/* Interim transcript in lighter text */}
-                  {interimTranscript && (
-                    <span className="text-gray-500 dark:text-gray-400 italic">
-                      {transcript ? ' ' : ''}{interimTranscript}
-                    </span>
-                  )}
-                </div>
-              ) : (
-                <span className="text-gray-400 italic">
-                  {recording ? "Start speaking... your words will appear here in real-time" : "Your transcribed answer will appear here"}
-                </span>
-              )}
+          {retryCount >= 3 && (
+            <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded">
+              <p className="text-blue-800 text-sm">
+                💡 <strong>Recommended:</strong> Switch to "Text Answer" mode above for the best experience, or check your internet connection and microphone permissions.
+              </p>
             </div>
-            
-            {/* Word count and speaking indicator */}
-            <div className="mt-2 text-sm text-gray-500 flex justify-between">
-              <span>
-                Words: {(transcript + ' ' + interimTranscript).trim().split(/\s+/).filter(word => word.length > 0).length}
-              </span>
-              {recording && interimTranscript && (
-                <span className="text-green-600 animate-pulse">
-                  Processing speech...
-                </span>
-              )}
-            </div>
-          </div>
-        )}
-        
-        <button
-          onClick={sendForFeedback}
-          disabled={
-            (inputMode === "voice" && (!transcript || recording)) || 
-            (inputMode === "text" && !manualText.trim()) || 
-            loading
-          }
-          className={`w-full py-3 px-4 rounded-lg font-medium transition-colors ${
-            (inputMode === "voice" && (!transcript || recording)) || 
-            (inputMode === "text" && !manualText.trim()) || 
-            loading
-              ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-              : "bg-blue-600 hover:bg-blue-700 text-white"
-          }`}
-        >
-          {loading ? "Analyzing..." : "Get Feedback"}
-        </button>
-      </div>
-      
-      {feedback && (
-        <div className="mt-8 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
-          <h3 className="font-medium text-gray-800 dark:text-white mb-4">Feedback Analysis</h3>
-          
-          <div className="space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="bg-white dark:bg-gray-800 p-3 rounded shadow-sm">
-                <h4 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">Sentiment</h4>
-                <div className="flex space-x-2">
-                  <div className="flex-1 bg-gray-100 dark:bg-gray-700 rounded-full h-2 mt-2">
-                    <div 
-                      className="bg-green-500 h-2 rounded-full" 
-                      style={{ width: `${feedback.sentiment.pos * 100}%` }}
-                    ></div>
-                  </div>
-                  <span className="text-sm font-medium">
-                    {Math.round(feedback.sentiment.pos * 100)}%
-                  </span>
-                </div>
-              </div>
-              
-              <div className="bg-white dark:bg-gray-800 p-3 rounded shadow-sm">
-                <h4 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">Clarity Score</h4>
-                <div className="flex space-x-2">
-                  <div className="flex-1 bg-gray-100 dark:bg-gray-700 rounded-full h-2 mt-2">
-                    <div 
-                      className="bg-blue-500 h-2 rounded-full" 
-                      style={{ width: `${feedback.clarity_score * 100}%` }}
-                    ></div>
-                  </div>
-                  <span className="text-sm font-medium">
-                    {Math.round(feedback.clarity_score * 100)}%
-                  </span>
-                </div>
-              </div>
-            </div>
-            
-            <div className="bg-white dark:bg-gray-800 p-3 rounded shadow-sm">
-              <h4 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">Filler Words</h4>
-              <div className="flex flex-wrap gap-2">
-                {Object.entries(feedback.filler_words).map(([word, count]) => (
-                  count > 0 && (
-                    <div 
-                      key={word} 
-                      className="bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-xs"
-                    >
-                      "{word}" <span className="font-medium text-gray-600 dark:text-gray-300">{count}x</span>
-                    </div>
-                  )
-                ))}
-                {Object.values(feedback.filler_words).every(count => count === 0) && (
-                  <p className="text-sm text-gray-600 dark:text-gray-400">No filler words detected! Great job!</p>
-                )}
-              </div>
-            </div>
-            
-            <div className="bg-white dark:bg-gray-800 p-3 rounded shadow-sm">
-              <h4 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">Overall Feedback</h4>
-              <p className="text-gray-800 dark:text-white">{feedback.overall_feedback}</p>
-            </div>
-          </div>
+          )}
+        </div>
+      )}
+
+      {/* Loading State */}
+      {loading && (
+        <div className="flex justify-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
         </div>
       )}
     </div>
