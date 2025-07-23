@@ -14,6 +14,9 @@ import {
 export default function Recorder({ question, onFeedback }) {
   const [recording, setRecording] = useState(false);
   const [transcript, setTranscript] = useState("");
+  const [interimTranscript, setInterimTranscript] = useState("");
+  const [manualText, setManualText] = useState("");
+  const [inputMode, setInputMode] = useState("voice"); // "voice" or "text"
   const [feedback, setFeedback] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -43,13 +46,27 @@ export default function Recorder({ question, onFeedback }) {
           interimResults: true,
           lang: "en-US",
           onResult: ({ finalTranscript, interimTranscript }) => {
-            console.log('Speech result:', { finalTranscript, interimTranscript });
+            console.log('Speech result received:', { 
+              final: finalTranscript, 
+              interim: interimTranscript,
+              finalLength: finalTranscript.length,
+              interimLength: interimTranscript.length
+            });
+            
+            // Update interim transcript for live display
+            if (interimTranscript) {
+              setInterimTranscript(interimTranscript);
+            }
+            
+            // Add final transcript to the accumulated transcript
             if (finalTranscript) {
               setTranscript(prev => {
                 const newTranscript = prev + finalTranscript;
-                console.log('Updated transcript:', newTranscript);
+                console.log('Updated accumulated transcript:', newTranscript);
                 return newTranscript;
               });
+              // Clear interim transcript when we get final results
+              setInterimTranscript("");
             }
           },
           onError: (event) => {
@@ -120,6 +137,7 @@ export default function Recorder({ question, onFeedback }) {
   const startRecording = async () => {
     console.log('Starting recording...');
     setTranscript("");
+    setInterimTranscript("");
     setFeedback(null);
     setError("");
     setRetryCount(0);
@@ -155,13 +173,16 @@ export default function Recorder({ question, onFeedback }) {
   const stopRecording = () => {
     console.log('Stopping recording...');
     setRecording(false);
+    setInterimTranscript(""); // Clear interim text when stopping
     stopSpeechRecognition();
     console.log('Recording stopped');
   };
 
   const sendForFeedback = async () => {
-    if (!transcript.trim()) {
-      setError("No recording to analyze. Please record your answer first.");
+    const answerText = inputMode === "voice" ? transcript : manualText;
+    
+    if (!answerText.trim()) {
+      setError("No answer to analyze. Please provide your answer first.");
       return;
     }
     
@@ -169,7 +190,7 @@ export default function Recorder({ question, onFeedback }) {
     setError("");
     
     try {
-      const data = await getVerbalFeedback(question.questionText, transcript);
+      const data = await getVerbalFeedback(question.questionText, answerText);
       const feedbackData = data.feedback[0];
       setFeedback(feedbackData);
 
@@ -178,7 +199,7 @@ export default function Recorder({ question, onFeedback }) {
         await updateDoc(doc(db, "users", user.uid), {
           interviewFeedback: arrayUnion({
             question: question.questionText,
-            answer: transcript,
+            answer: answerText,
             feedback: feedbackData,
             timestamp: new Date(),
           }),
@@ -210,44 +231,89 @@ export default function Recorder({ question, onFeedback }) {
       </div>
       
       <div className="space-y-4">
-        {/* Microphone Status */}
-        <div className="text-center p-2">
-          {microphoneReady ? (
-            <div className="text-green-600 text-sm">
-              🎤 Microphone ready
-            </div>
-          ) : (
-            <div className="text-yellow-600 text-sm">
-              🎤 Setting up microphone...
-            </div>
-          )}
+        {/* Input Mode Switcher */}
+        <div className="flex justify-center mb-4">
+          <div className="bg-gray-100 dark:bg-gray-700 rounded-lg p-1">
+            <button
+              onClick={() => setInputMode("voice")}
+              className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                inputMode === "voice"
+                  ? "bg-white dark:bg-gray-800 text-blue-600 shadow"
+                  : "text-gray-600 dark:text-gray-400"
+              }`}
+            >
+              🎤 Voice Input
+            </button>
+            <button
+              onClick={() => setInputMode("text")}
+              className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                inputMode === "text"
+                  ? "bg-white dark:bg-gray-800 text-blue-600 shadow"
+                  : "text-gray-600 dark:text-gray-400"
+              }`}
+            >
+              ✏️ Text Input
+            </button>
+          </div>
         </div>
 
-        <div className="flex space-x-4">
-          <button
-            onClick={startRecording}
-            disabled={recording || loading || !microphoneReady}
-            className={`flex-1 py-3 px-4 rounded-lg font-medium transition-colors ${
-              recording || loading || !microphoneReady
-                ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                : "bg-green-600 hover:bg-green-700 text-white"
-            }`}
-          >
-            {recording ? "Recording..." : "Start Recording"}
-          </button>
-          
-          <button
-            onClick={stopRecording}
-            disabled={!recording || loading}
-            className={`flex-1 py-3 px-4 rounded-lg font-medium transition-colors ${
-              !recording || loading
-                ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                : "bg-red-600 hover:bg-red-700 text-white"
-            }`}
-          >
-            Stop Recording
-          </button>
-        </div>
+        {inputMode === "voice" && (
+          <>
+            {/* Microphone Status */}
+            <div className="text-center p-2">
+              {microphoneReady ? (
+                <div className="text-green-600 text-sm">
+                  🎤 Microphone ready
+                </div>
+              ) : (
+                <div className="text-yellow-600 text-sm">
+                  🎤 Setting up microphone...
+                </div>
+              )}
+            </div>
+
+            <div className="flex space-x-4">
+              <button
+                onClick={startRecording}
+                disabled={recording || loading || !microphoneReady}
+                className={`flex-1 py-3 px-4 rounded-lg font-medium transition-colors ${
+                  recording || loading || !microphoneReady
+                    ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                    : "bg-green-600 hover:bg-green-700 text-white"
+                }`}
+              >
+                {recording ? "Recording..." : "Start Recording"}
+              </button>
+              
+              <button
+                onClick={stopRecording}
+                disabled={!recording || loading}
+                className={`flex-1 py-3 px-4 rounded-lg font-medium transition-colors ${
+                  !recording || loading
+                    ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                    : "bg-red-600 hover:bg-red-700 text-white"
+                }`}
+              >
+                Stop Recording
+              </button>
+            </div>
+          </>
+        )}
+
+        {inputMode === "text" && (
+          <div className="space-y-4">
+            <textarea
+              value={manualText}
+              onChange={(e) => setManualText(e.target.value)}
+              placeholder="Type your answer here..."
+              className="w-full p-4 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white min-h-[120px] resize-vertical"
+              disabled={loading}
+            />
+            <div className="text-sm text-gray-500">
+              Words: {manualText.trim().split(/\s+/).filter(word => word.length > 0).length}
+            </div>
+          </div>
+        )}
         
         {error && (
           <div className="p-3 bg-red-50 dark:bg-red-900/30 rounded-lg">
@@ -264,23 +330,62 @@ export default function Recorder({ question, onFeedback }) {
             )}
           </div>
         )}
-        
-        <div className="mt-4">
-          <h3 className="font-medium text-gray-800 dark:text-white mb-2">Your Answer:</h3>
-          <div className="bg-gray-50 dark:bg-gray-900 p-4 rounded-lg min-h-[100px] border border-gray-200 dark:border-gray-700">
-            {transcript ? transcript : (
-              <span className="text-gray-400 italic">
-                {recording ? "Speaking..." : "Your transcribed answer will appear here"}
+        {inputMode === "voice" && (
+          <div className="mt-4">
+            <h3 className="font-medium text-gray-800 dark:text-white mb-2">
+              Your Answer:
+              {recording && (
+                <span className="ml-2 text-sm text-green-600 animate-pulse">
+                  🎤 Listening...
+                </span>
+              )}
+            </h3>
+            <div className="bg-gray-50 dark:bg-gray-900 p-4 rounded-lg min-h-[100px] border border-gray-200 dark:border-gray-700">
+              {transcript || interimTranscript ? (
+                <div className="whitespace-pre-wrap">
+                  {/* Final transcript in normal text */}
+                  <span className="text-gray-900 dark:text-white">
+                    {transcript}
+                  </span>
+                  {/* Interim transcript in lighter text */}
+                  {interimTranscript && (
+                    <span className="text-gray-500 dark:text-gray-400 italic">
+                      {transcript ? ' ' : ''}{interimTranscript}
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <span className="text-gray-400 italic">
+                  {recording ? "Start speaking... your words will appear here in real-time" : "Your transcribed answer will appear here"}
+                </span>
+              )}
+            </div>
+            
+            {/* Word count and speaking indicator */}
+            <div className="mt-2 text-sm text-gray-500 flex justify-between">
+              <span>
+                Words: {(transcript + ' ' + interimTranscript).trim().split(/\s+/).filter(word => word.length > 0).length}
               </span>
-            )}
+              {recording && interimTranscript && (
+                <span className="text-green-600 animate-pulse">
+                  Processing speech...
+                </span>
+              )}
+            </div>
           </div>
-        </div>
+        )}
         
         <button
           onClick={sendForFeedback}
-          disabled={!transcript || loading || recording}
+          disabled={
+            (inputMode === "voice" && (!transcript || recording)) || 
+            (inputMode === "text" && !manualText.trim()) || 
+            loading
+          }
           className={`w-full py-3 px-4 rounded-lg font-medium transition-colors ${
-            !transcript || loading || recording
+            (inputMode === "voice" && (!transcript || recording)) || 
+            (inputMode === "text" && !manualText.trim()) || 
+            loading
               ? "bg-gray-300 text-gray-500 cursor-not-allowed"
               : "bg-blue-600 hover:bg-blue-700 text-white"
           }`}

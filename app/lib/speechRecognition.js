@@ -1,6 +1,7 @@
 "use client";
 
 let recognitionInstance = null;
+let shouldKeepRecording = false;
 
 /**
  * Initialize the speech recognition API
@@ -49,19 +50,23 @@ export function initSpeechRecognition(options = {}) {
     let finalTranscript = '';
     let interimTranscript = '';
     
+    // Process all results from the current event
     for (let i = event.resultIndex; i < event.results.length; i++) {
       const transcript = event.results[i][0].transcript;
       
       if (event.results[i].isFinal) {
         finalTranscript += transcript + ' ';
+        console.log('Final transcript:', transcript);
       } else {
         interimTranscript += transcript;
+        console.log('Interim transcript:', transcript);
       }
     }
     
+    // Call the result callback with both final and interim results
     config.onResult({
-      finalTranscript,
-      interimTranscript,
+      finalTranscript: finalTranscript.trim(),
+      interimTranscript: interimTranscript.trim(),
       event,
     });
   };
@@ -113,8 +118,22 @@ export function initSpeechRecognition(options = {}) {
   };
   
   recognitionInstance.onend = () => {
-    console.log('Speech recognition ended');
-    // Don't restart automatically to avoid issues
+    console.log('Speech recognition ended, shouldKeepRecording:', shouldKeepRecording);
+    
+    // If we're still supposed to be recording, restart recognition
+    if (shouldKeepRecording && recognitionInstance) {
+      console.log('Attempting to restart continuous recognition...');
+      setTimeout(() => {
+        try {
+          recognitionInstance.start();
+          console.log('Successfully restarted recognition');
+        } catch (error) {
+          if (error.name !== 'InvalidStateError') {
+            console.error('Recognition restart error:', error);
+          }
+        }
+      }, 100);
+    }
   };
   
   recognitionInstance.onstart = () => {
@@ -155,6 +174,8 @@ export function startSpeechRecognition() {
   }
   
   try {
+    shouldKeepRecording = true;
+    
     // Stop any existing recognition first
     try {
       recognitionInstance.stop();
@@ -169,10 +190,8 @@ export function startSpeechRecognition() {
         console.log('Speech recognition start requested');
       } catch (startError) {
         console.error('Error starting speech recognition:', startError);
-        // Try to recover by creating a new instance
         if (startError.name === 'InvalidStateError') {
-          console.log('Attempting to recover from InvalidStateError');
-          // The recognition is already started, so we don't need to do anything
+          console.log('Recognition already running');
         }
       }
     }, 100);
@@ -180,6 +199,7 @@ export function startSpeechRecognition() {
     return true;
   } catch (error) {
     console.error('Failed to start speech recognition:', error);
+    shouldKeepRecording = false;
     return false;
   }
 }
@@ -189,12 +209,15 @@ export function startSpeechRecognition() {
  * @returns {boolean} - Whether recognition was stopped successfully
  */
 export function stopSpeechRecognition() {
+  shouldKeepRecording = false;
+  
   if (!recognitionInstance) {
     return false;
   }
   
   try {
     recognitionInstance.stop();
+    console.log('Speech recognition stop requested');
     return true;
   } catch (error) {
     console.error('Failed to stop speech recognition:', error);
