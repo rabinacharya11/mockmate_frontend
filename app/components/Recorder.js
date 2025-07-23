@@ -3,12 +3,10 @@ import { useState, useEffect } from "react";
 import { useAuth } from "../context/AuthContext";
 import { db } from "../lib/firebase";
 import { doc, updateDoc, arrayUnion } from "firebase/firestore";
-import { getVerbalFeedback } from "../lib/api";
 
-export default function Recorder({ question, onFeedback }) {
+export default function Recorder({ question, onAnswerComplete, isLastQuestion, currentAnswerState }) {
   const [manualText, setManualText] = useState("");
   const [inputMode, setInputMode] = useState("voice"); // "voice" or "text"
-  const [feedback, setFeedback] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [isRecording, setIsRecording] = useState(false);
@@ -19,6 +17,7 @@ export default function Recorder({ question, onFeedback }) {
   const [mediaRecorder, setMediaRecorder] = useState(null);
   const [audioStream, setAudioStream] = useState(null);
   const [useWebSpeechAPI, setUseWebSpeechAPI] = useState(false); // Start with false to avoid network issues
+  const [isSubmitted, setIsSubmitted] = useState(false);
   const { user } = useAuth();
 
   // Initialize Speech Recognition
@@ -282,34 +281,45 @@ export default function Recorder({ question, onFeedback }) {
     setError("");
     
     try {
-      console.log('📤 Sending for feedback:', {
+      console.log('📤 Submitting answer:', {
         question: question.questionText,
         answer: answerText
       });
       
-      const data = await getVerbalFeedback(question.questionText, answerText);
-      const feedbackData = data.feedback[0];
-      setFeedback(feedbackData);
+      // Create answer data to pass to parent component
+      const answerData = {
+        questionId: question.id,
+        questionText: question.questionText,
+        answer: answerText,
+        voiceConvertedToText: answerText, // Store the voice-converted text for API
+        timestamp: new Date().toISOString(),
+        isComplete: true
+      };
 
-      // Store feedback in Firestore
+      // Store answer in Firestore (without feedback for now)
       if (user) {
         await updateDoc(doc(db, "users", user.uid), {
-          interviewFeedback: arrayUnion({
+          interviewAnswers: arrayUnion({
+            questionId: question.id,
             question: question.questionText,
             answer: answerText,
-            feedback: feedbackData,
+            voiceConvertedToText: answerText,
             timestamp: new Date(),
           }),
         });
       }
 
-      if (onFeedback) {
-        onFeedback(feedbackData);
+      // Set submitted state
+      setIsSubmitted(true);
+
+      // Call the parent component's callback
+      if (onAnswerComplete) {
+        onAnswerComplete(answerData);
       }
 
     } catch (err) {
-      console.error('❌ Error getting feedback:', err);
-      setError(`Failed to get feedback: ${err.message}`);
+      console.error('❌ Error submitting answer:', err);
+      setError(`Failed to submit answer: ${err.message}`);
     } finally {
       setLoading(false);
     }
@@ -323,12 +333,12 @@ export default function Recorder({ question, onFeedback }) {
     submitForFeedback(manualText.trim());
   };
 
-  const clearFeedback = () => {
-    setFeedback(null);
+  const clearAnswer = () => {
     setTranscript("");
     setManualText("");
     setError("");
     setRetryCount(0);
+    setIsSubmitted(false);
   };
 
   const retryRecording = () => {
@@ -346,47 +356,25 @@ export default function Recorder({ question, onFeedback }) {
     }
   };
 
-  if (feedback) {
+  // Show success message if answer has been submitted
+  if (isSubmitted || currentAnswerState) {
     return (
       <div className="space-y-6">
-        <div className="bg-gradient-to-r from-green-50 to-blue-50 border border-green-200 rounded-lg p-6">
-          <h3 className="text-lg font-semibold text-gray-800 mb-4">Interview Feedback</h3>
-          
-          <div className="space-y-4">
-            <div>
-              <h4 className="font-medium text-gray-700 mb-2">Overall Score</h4>
-              <div className="bg-white rounded-lg p-3 border">
-                <span className="text-2xl font-bold text-blue-600">{feedback.overallScore}/10</span>
-              </div>
-            </div>
-
-            <div>
-              <h4 className="font-medium text-gray-700 mb-2">Strengths</h4>
-              <div className="bg-white rounded-lg p-3 border">
-                <p className="text-gray-800">{feedback.strengths}</p>
-              </div>
-            </div>
-
-            <div>
-              <h4 className="font-medium text-gray-700 mb-2">Areas for Improvement</h4>
-              <div className="bg-white rounded-lg p-3 border">
-                <p className="text-gray-800">{feedback.improvements}</p>
-              </div>
-            </div>
-
-            <div>
-              <h4 className="font-medium text-gray-700 mb-2">Specific Feedback</h4>
-              <div className="bg-white rounded-lg p-3 border">
-                <p className="text-gray-800">{feedback.specificFeedback}</p>
-              </div>
-            </div>
+        <div className="bg-gradient-to-r from-green-50 to-blue-50 border border-green-200 rounded-lg p-6 text-center">
+          <div className="text-green-600 mb-4">
+            <svg className="w-16 h-16 mx-auto" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+            </svg>
           </div>
-
+          <h3 className="text-lg font-semibold text-gray-800 mb-2">Answer Recorded!</h3>
+          <p className="text-gray-600 mb-4">
+            Your response has been saved. {isLastQuestion ? 'Complete all questions to see your analysis.' : 'Continue to the next question when ready.'}
+          </p>
           <button
-            onClick={clearFeedback}
-            className="mt-6 w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition duration-200"
+            onClick={clearAnswer}
+            className="bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition duration-200"
           >
-            Continue to Next Question
+            Record New Answer
           </button>
         </div>
       </div>
@@ -435,7 +423,7 @@ export default function Recorder({ question, onFeedback }) {
                 <p className="text-blue-800 text-sm">
                   🎤 <strong>Voice Recording with AI Transcription:</strong> Click "Start Recording" to record your answer. We'll automatically transcribe it using AssemblyAI's advanced speech-to-text technology!
                   <br/>
-                  ✨ <strong>How it works:</strong> Record → Stop → Auto-transcribe → Review → Submit for feedback
+                  ✨ <strong>How it works:</strong> Record → Stop → Auto-transcribe → Review → Submit answer
                 </p>
               </div>
 
@@ -491,7 +479,7 @@ export default function Recorder({ question, onFeedback }) {
                   disabled={loading}
                   className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg transition duration-200 disabled:opacity-50"
                 >
-                  {loading ? "Getting Feedback..." : "Get Feedback"}
+                  {loading ? "Submitting Answer..." : "Submit Answer"}
                 </button>
               )}
             </>

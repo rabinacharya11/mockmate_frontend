@@ -296,7 +296,7 @@ export async function generateQuestions(data) {
 }
 
 /**
- * Get verbal feedback for an interview answer
+ * Get verbal feedback for an answer
  * @param {string} questionText - The interview question
  * @param {string} voiceConvertedToText - The transcribed answer
  * @returns {Promise<object>} - The feedback analysis
@@ -340,6 +340,63 @@ export async function getVerbalFeedback(questionText, voiceConvertedToText) {
     }
   } catch (error) {
     logger.error('Verbal feedback API failed:', error.message);
+    
+    // Check for specific error types and provide helpful error messages
+    if (error.code === 'ECONNREFUSED' || error.message.includes('Network Error')) {
+      throw new Error('Cannot connect to API server. Please ensure the backend is running on localhost:8000');
+    }
+    
+    if (error.code === 'ECONNABORTED') {
+      throw new Error('Request timed out. Please try again.');
+    }
+    
+    if (error.response?.status === 422) {
+      throw new Error('Invalid data format. Please check your question and answer data.');
+    }
+    
+    if (error.response?.status === 500) {
+      throw new Error('Server error occurred during feedback analysis. Please try again.');
+    }
+    
+    // Re-throw the error to force the frontend to handle it
+    throw new Error(`Verbal feedback failed: ${error.message}`);
+  }
+}
+
+/**
+ * Get verbal feedback for multiple questions and answers
+ * @param {Array} questionsAndAnswers - Array of {questionText, voiceConvertedToText} objects
+ * @returns {Promise<object>} - The feedback analysis for all questions
+ */
+export async function getMultipleVerbalFeedback(questionsAndAnswers) {
+  try {
+    logger.info('Getting verbal feedback for multiple questions from FastAPI backend');
+    
+    // Format request data according to the new API specification
+    const requestData = questionsAndAnswers.map(qa => ({
+      questionText: qa.questionText,
+      voiceConvertedToText: qa.voiceConvertedToText
+    }));
+    
+    const apiUrl = config.api.baseUrl || "/api/proxy";
+    
+    // Use axios for the request
+    const response = await axios.post(`${apiUrl}/verbal-feedback`, requestData, {
+      headers: { 'Content-Type': 'application/json' }
+      // No timeout - let it take as long as needed for AI analysis
+    });
+    
+    const result = response.data;
+    
+    // Validate response format according to API specification
+    if (result && result.feedback && Array.isArray(result.feedback)) {
+      return result;
+    } else {
+      logger.warn('Multiple verbal feedback API returned unexpected format');
+      throw new Error('Invalid response format from verbal feedback API');
+    }
+  } catch (error) {
+    logger.error('Multiple verbal feedback API failed:', error.message);
     
     // Check for specific error types and provide helpful error messages
     if (error.code === 'ECONNREFUSED' || error.message.includes('Network Error')) {
