@@ -94,8 +94,8 @@ export default function Reports() {
         session.results.forEach(result => {
           if (result.feedback && result.feedback.length) {
             result.feedback.forEach(feedback => {
-              totalClarity += feedback.clarity_score || 0;
-              totalSentiment += feedback.sentiment?.compound || 0;
+              totalClarity += (feedback.clarity_score || 0);
+              totalSentiment += (feedback.sentiment?.compound || 0);
               totalAnswers++;
             });
           }
@@ -105,7 +105,7 @@ export default function Reports() {
     
     return {
       clarity: totalAnswers > 0 ? (totalClarity / totalAnswers * 100) : 0,
-      sentiment: totalAnswers > 0 ? ((totalSentiment + 1) / 2 * 100) : 50
+      sentiment: totalAnswers > 0 ? (((totalSentiment / totalAnswers) + 1) / 2 * 100) : 50
     };
   };
 
@@ -126,7 +126,7 @@ export default function Reports() {
       session.results.forEach(result => {
         if (result.feedback && result.feedback.length) {
           result.feedback.forEach(feedback => {
-            totalClarity += feedback.clarity_score || 0;
+            totalClarity += (feedback.clarity_score || 0);
             count++;
           });
         }
@@ -144,13 +144,13 @@ export default function Reports() {
       session.results.forEach(result => {
         if (result.feedback && result.feedback.length) {
           result.feedback.forEach(feedback => {
-            totalSentiment += feedback.sentiment?.compound || 0;
+            totalSentiment += (feedback.sentiment?.compound || 0);
             count++;
           });
         }
       });
       
-      return count > 0 ? ((totalSentiment / count + 1) / 2 * 100) : 50;
+      return count > 0 ? (((totalSentiment / count) + 1) / 2 * 100) : 50;
     });
 
     return {
@@ -510,15 +510,15 @@ export default function Reports() {
                         <div>
                           <p className="text-xs font-medium text-gray-500 dark:text-gray-400">Clarity Score</p>
                           <p className="text-lg font-semibold text-blue-600">
-                            {(result.feedback[0].clarity_score * 100).toFixed(1)}%
+                            {Math.round((result.feedback[0].clarity_score || 0) * 100)}%
                           </p>
                         </div>
                         <div>
                           <p className="text-xs font-medium text-gray-500 dark:text-gray-400">Sentiment</p>
                           <p className="text-lg font-semibold text-green-600">
                             {result.feedback[0].sentiment?.compound 
-                              ? ((result.feedback[0].sentiment.compound + 1) / 2 * 100).toFixed(1) 
-                              : 'N/A'}%
+                              ? Math.round(((result.feedback[0].sentiment.compound + 1) / 2) * 100)
+                              : 50}%
                           </p>
                         </div>
                         <div>
