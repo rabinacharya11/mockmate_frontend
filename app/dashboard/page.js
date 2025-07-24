@@ -5,6 +5,7 @@ import CVUpload from "../components/CVUpload";
 import QuestionList from "../components/QuestionList";
 import InterviewSession from "../components/InterviewSession";
 import Reports from "../components/Reports";
+import InterviewFeedbackManager from "../components/InterviewFeedbackManager";
 import { redirect } from "next/navigation";
 
 export default function Dashboard() {
@@ -49,13 +50,14 @@ export default function Dashboard() {
 
   const handleInterviewComplete = () => {
     setShowInterview(false);
-    setActiveTab("reports");
+    setActiveTab("feedback");
   };
 
   const tabs = [
     { id: "upload", label: "Upload CV", icon: "📄" },
     { id: "interview", label: "Mock Interview", icon: "🎤", disabled: skills.length === 0 },
     { id: "reports", label: "Performance Reports", icon: "📊" },
+    { id: "feedback", label: "Detailed Feedback", icon: "🤖" },
   ];
 
   return (
@@ -114,6 +116,17 @@ export default function Dashboard() {
                 3
               </div>
               <span className="hidden md:block text-sm font-medium">View Reports</span>
+            </div>
+
+            <div className={`w-8 h-1 ${activeTab === 'feedback' ? 'bg-blue-400' : 'bg-gray-200'}`}></div>
+            
+            <div className={`flex items-center space-x-2 ${activeTab === 'feedback' ? 'text-blue-600' : 'text-gray-400'}`}>
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
+                activeTab === 'feedback' ? 'bg-blue-100 text-blue-600' : 'bg-gray-100 text-gray-400'
+              }`}>
+                4
+              </div>
+              <span className="hidden md:block text-sm font-medium">AI Feedback</span>
             </div>
           </div>
         </div>
@@ -184,6 +197,8 @@ export default function Dashboard() {
           )}
           
           {activeTab === "reports" && <Reports />}
+          
+          {activeTab === "feedback" && <InterviewFeedbackManager />}
         </div>
       </main>
     </div>

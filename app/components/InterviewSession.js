@@ -2,8 +2,8 @@
 import { useState, useEffect } from "react";
 import { useAuth } from "../context/AuthContext";
 import { db } from "../lib/firebase";
-import { doc, updateDoc, arrayUnion, collection, addDoc, setDoc } from "firebase/firestore";
-import { getVerbalFeedback } from "../lib/api";
+import { doc, updateDoc, arrayUnion, collection, addDoc, setDoc, getDoc } from "firebase/firestore";
+import { getVerbalFeedback, getMultipleVerbalFeedback } from "../lib/api";
 import Recorder from "./Recorder";
 
 export default function InterviewSession({ questions = [], onComplete, onBack }) {
@@ -52,125 +52,218 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
   };
 
   const handleAnswerComplete = (answerData) => {
-    // Store the answer
-    setAnswers(prev => [...prev, answerData]);
-    
-    // Generate feedback for this answer
-    generateFeedbackForAnswer(answerData);
+    // Check if we already have an answer for this question and replace it
+    setAnswers(prev => {
+      const existingIndex = prev.findIndex(answer => answer.questionText === answerData.questionText);
+      
+      if (existingIndex !== -1) {
+        // Replace existing answer
+        const updatedAnswers = [...prev];
+        updatedAnswers[existingIndex] = answerData;
+        console.log('Replaced existing answer for question:', answerData.questionText);
+        return updatedAnswers;
+      } else {
+        // Add new answer
+        console.log('Added new answer for question:', answerData.questionText);
+        return [...prev, answerData];
+      }
+    });
   };
 
-  const generateFeedbackForAnswer = async (answerData) => {
-    try {
-      setLoading(true);
-      console.log('Generating feedback for answer:', answerData);
-      
-      const feedbackResponse = await getVerbalFeedback(
-        answerData.questionText, 
-        answerData.answer
-      );
-      
-      if (feedbackResponse && feedbackResponse.feedback && feedbackResponse.feedback[0]) {
-        const feedbackData = feedbackResponse.feedback[0];
-        
-        // Update the feedback state
-        setFeedback(feedbackData);
-        
-        // Store feedback in allFeedback array
-        setAllFeedback(prev => [...prev, {
-          question: answerData.questionText,
-          answer: answerData.answer,
-          feedback: feedbackData,
-          timestamp: new Date()
-        }]);
-        
-        console.log('Feedback generated successfully:', feedbackData);
-      }
-    } catch (err) {
-      console.error("Error generating feedback:", err);
-      setError("Failed to generate feedback. The answer was saved but feedback analysis failed.");
-      
-      // Store a default feedback entry so the flow can continue
-      setAllFeedback(prev => [...prev, {
-        question: answerData.questionText,  
-        answer: answerData.answer,
-        feedback: {
-          sentiment: { pos: 0.5, neg: 0.1, neu: 0.4, compound: 0.4 },
-          clarity_score: 0.7,
-          filler_words: {},
-          overall_feedback: "Feedback analysis unavailable. Please try again later."
-        },
-        timestamp: new Date()
-      }]);
-    } finally {
-      setLoading(false);
+  // Helper function to analyze sentiment and provide insights
+  const analyzeSentiment = (sentiment) => {
+    const { neg, neu, pos, compound } = sentiment;
+    
+    let mood = 'neutral';
+    let confidence = 'moderate';
+    let insights = [];
+    
+    // Determine overall mood based on compound score
+    if (compound >= 0.5) {
+      mood = 'very positive';
+      confidence = 'high';
+    } else if (compound >= 0.1) {
+      mood = 'positive';
+      confidence = 'good';
+    } else if (compound >= -0.1) {
+      mood = 'neutral';
+      confidence = 'moderate';
+    } else if (compound >= -0.5) {
+      mood = 'negative';
+      confidence = 'concerning';
+    } else {
+      mood = 'very negative';
+      confidence = 'low';
     }
+    
+    // Generate insights based on sentiment distribution
+    if (pos > 0.3) {
+      insights.push('Strong positive language detected');
+    }
+    if (neg > 0.1) {
+      insights.push('Some negative language detected');
+    }
+    if (neu > 0.8) {
+      insights.push('Very neutral tone - could be more expressive');
+    }
+    if (pos > neg * 2) {
+      insights.push('Optimistic and confident communication style');
+    }
+    if (neg > pos) {
+      insights.push('Consider using more positive language');
+    }
+    
+    return {
+      mood,
+      confidence,
+      insights,
+      scores: { neg, neu, pos, compound }
+    };
+  };
+
+  // Helper function to get clarity insights
+  const getClarityInsights = (clarityScore) => {
+    if (clarityScore >= 0.9) return { level: 'excellent', message: 'Extremely clear and well-structured' };
+    if (clarityScore >= 0.8) return { level: 'very good', message: 'Clear and easy to understand' };
+    if (clarityScore >= 0.7) return { level: 'good', message: 'Generally clear with minor improvements needed' };
+    if (clarityScore >= 0.6) return { level: 'fair', message: 'Could be clearer and more structured' };
+    return { level: 'needs improvement', message: 'Requires significant clarity improvements' };
+  };
+
+  // Helper function to analyze filler words
+  const analyzeFillerWords = (fillerWords) => {
+    const total = Object.values(fillerWords).reduce((sum, count) => sum + count, 0);
+    const mostUsed = Object.entries(fillerWords)
+      .filter(([word, count]) => count > 0)
+      .sort(([,a], [,b]) => b - a)
+      .slice(0, 3);
+    
+    let level = 'excellent';
+    let message = 'Minimal use of filler words';
+    
+    if (total > 10) {
+      level = 'needs improvement';
+      message = 'High usage of filler words detected';
+    } else if (total > 5) {
+      level = 'fair';  
+      message = 'Moderate use of filler words';
+    } else if (total > 2) {
+      level = 'good';
+      message = 'Low use of filler words';
+    }
+    
+    return {
+      total,
+      level,
+      message,
+      mostUsed: mostUsed.map(([word, count]) => ({ word, count }))
+    };
   };
 
   const submitInterview = async () => {
     setLoading(true);
+    setError("");
     
     try {
-      // Prepare the final session data with all collected answers and feedback
-      const sessionEndTime = new Date();
-      const sessionDuration = Math.round((sessionEndTime - sessionStartTime) / 1000); // in seconds
+      console.log('🚀 Starting interview completion with answers:', answers.length);
       
-      // Ensure we have feedback for all answers
-      let finalAnswersWithFeedback = [...allFeedback];
+      // Prepare all questions and answers for batch feedback generation
+      const questionsAndAnswers = answers.map(answer => ({
+        questionText: answer.questionText,
+        voiceConvertedToText: answer.answer
+      }));
       
-      // If we have answers without feedback, generate feedback for them
-      if (answers.length > allFeedback.length) {
-        console.log('Generating missing feedback for remaining answers...');
-        
-        for (const answer of answers) {
-          const existingFeedback = allFeedback.find(f => f.question === answer.questionText);
-          if (!existingFeedback) {
-            try {
-              const feedbackResponse = await getVerbalFeedback(answer.questionText, answer.answer);
-              if (feedbackResponse && feedbackResponse.feedback && feedbackResponse.feedback[0]) {
-                finalAnswersWithFeedback.push({
-                  question: answer.questionText,
-                  answer: answer.answer,
-                  feedback: feedbackResponse.feedback[0],
-                  timestamp: new Date()
-                });
-              }
-            } catch (err) {
-              console.error(`Failed to get feedback for question: ${answer.questionText}`, err);
-              // Add default feedback
-              finalAnswersWithFeedback.push({
-                question: answer.questionText,
-                answer: answer.answer, 
-                feedback: {
-                  sentiment: { pos: 0.5, neg: 0.1, neu: 0.4, compound: 0.4 },
-                  clarity_score: 0.7,
-                  filler_words: {},
-                  overall_feedback: "Feedback analysis unavailable."
-                },
-                timestamp: new Date()
-              });
-            }
-          }
-        }
+      console.log('📤 Generating feedback for all answers...');
+      
+      // Generate feedback for all answers at once using the multiple feedback API
+      const feedbackResponse = await getMultipleVerbalFeedback(questionsAndAnswers);
+      
+      if (!feedbackResponse || !feedbackResponse.feedback || !Array.isArray(feedbackResponse.feedback)) {
+        throw new Error('Invalid feedback response format');
       }
-
-      // Calculate session metrics
+      
+      console.log('✅ Raw feedback response:', feedbackResponse);
+      
+      // Process the API response format and combine with enhanced analysis
+      const answersWithEnhancedFeedback = answers.map((answer, index) => {
+        const apiFeedback = feedbackResponse.feedback[index];
+        
+        if (!apiFeedback) {
+          console.warn(`No feedback received for question ${index + 1}`);
+          return {
+            question: answer.questionText,
+            answer: answer.answer,
+            feedback: {
+              sentiment: { pos: 0.5, neg: 0.1, neu: 0.4, compound: 0.4 },
+              clarity_score: 0.7,
+              filler_words: {},
+              overall_feedback: "Feedback analysis unavailable."
+            },
+            enhancedAnalysis: {
+              sentimentAnalysis: { mood: 'neutral', confidence: 'moderate', insights: [] },
+              clarityInsights: { level: 'fair', message: 'Analysis unavailable' },
+              fillerAnalysis: { total: 0, level: 'unknown', message: 'Analysis unavailable', mostUsed: [] }
+            },
+            timestamp: answer.timestamp || new Date()
+          };
+        }
+        
+        // Use the actual API response format
+        const sentimentAnalysis = analyzeSentiment(apiFeedback.sentiment);
+        const clarityInsights = getClarityInsights(apiFeedback.clarity_score);
+        const fillerAnalysis = analyzeFillerWords(apiFeedback.filler_words);
+        
+        return {
+          question: apiFeedback.question || answer.questionText, // Use API question if available
+          answer: apiFeedback.answer || answer.answer, // Use API answer if available
+          feedback: {
+            sentiment: apiFeedback.sentiment,
+            clarity_score: apiFeedback.clarity_score,
+            filler_words: apiFeedback.filler_words,
+            overall_feedback: apiFeedback.overall_feedback
+          },
+          enhancedAnalysis: {
+            sentimentAnalysis,
+            clarityInsights,
+            fillerAnalysis
+          },
+          timestamp: answer.timestamp || new Date()
+        };
+      });
+      
+      console.log('✅ Enhanced feedback generated for all answers:', answersWithEnhancedFeedback.length);
+      
+      // Calculate comprehensive session metrics
+      const sessionEndTime = new Date();
+      const sessionDuration = Math.round((sessionEndTime - sessionStartTime) / 1000);
+      
       const sessionMetrics = {
         totalQuestions: sessionQuestions.length,
-        totalAnswers: finalAnswersWithFeedback.length,
-        averageClarity: finalAnswersWithFeedback.length > 0 
-          ? finalAnswersWithFeedback.reduce((sum, item) => sum + (item.feedback?.clarity_score || 0), 0) / finalAnswersWithFeedback.length
+        totalAnswers: answersWithEnhancedFeedback.length,
+        averageClarity: answersWithEnhancedFeedback.length > 0 
+          ? answersWithEnhancedFeedback.reduce((sum, item) => sum + (item.feedback?.clarity_score || 0), 0) / answersWithEnhancedFeedback.length
           : 0,
-        averageSentiment: finalAnswersWithFeedback.length > 0
-          ? finalAnswersWithFeedback.reduce((sum, item) => sum + (item.feedback?.sentiment?.compound || 0), 0) / finalAnswersWithFeedback.length
+        averageSentiment: answersWithEnhancedFeedback.length > 0
+          ? answersWithEnhancedFeedback.reduce((sum, item) => sum + (item.feedback?.sentiment?.compound || 0), 0) / answersWithEnhancedFeedback.length
           : 0,
-        totalFillerWords: finalAnswersWithFeedback.reduce((sum, item) => {
-          const fillerCount = Object.values(item.feedback?.filler_words || {}).reduce((total, count) => total + count, 0);
-          return sum + fillerCount;
+        totalFillerWords: answersWithEnhancedFeedback.reduce((sum, item) => {
+          return sum + (item.enhancedAnalysis?.fillerAnalysis?.total || 0);
         }, 0),
-        sessionDuration: sessionDuration
+        sessionDuration: sessionDuration,
+        // Enhanced metrics
+        sentimentDistribution: {
+          positive: answersWithEnhancedFeedback.filter(item => item.enhancedAnalysis?.sentimentAnalysis?.mood?.includes('positive')).length,
+          neutral: answersWithEnhancedFeedback.filter(item => item.enhancedAnalysis?.sentimentAnalysis?.mood === 'neutral').length,
+          negative: answersWithEnhancedFeedback.filter(item => item.enhancedAnalysis?.sentimentAnalysis?.mood?.includes('negative')).length
+        },
+        clarityDistribution: {
+          excellent: answersWithEnhancedFeedback.filter(item => item.enhancedAnalysis?.clarityInsights?.level === 'excellent').length,
+          good: answersWithEnhancedFeedback.filter(item => ['very good', 'good'].includes(item.enhancedAnalysis?.clarityInsights?.level)).length,
+          needsImprovement: answersWithEnhancedFeedback.filter(item => ['fair', 'needs improvement'].includes(item.enhancedAnalysis?.clarityInsights?.level)).length
+        }
       };
 
-      // Create session document compatible with Reports.js structure
+      // Create session document for interview sessions collection
       const sessionData = {
         sessionId: `session_${Date.now()}`,
         userId: user.uid,
@@ -178,10 +271,11 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
         completedAt: sessionEndTime,
         duration: sessionDuration,
         questions: sessionQuestions,
-        results: finalAnswersWithFeedback.map(item => ({
+        results: answersWithEnhancedFeedback.map(item => ({
           question: item.question,
           answer: item.answer,
           feedback: [item.feedback], // Reports.js expects feedback as an array
+          enhancedAnalysis: item.enhancedAnalysis,
           timestamp: item.timestamp
         })),
         metrics: sessionMetrics,
@@ -189,11 +283,73 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
         questionCount: sessionQuestions.length
       };
 
-      // Store session in Firebase
+      // Create enhanced feedback document for new feedback collection
+      const feedbackData = {
+        userId: user.uid,
+        sessionId: sessionData.sessionId,
+        createdAt: sessionStartTime,
+        completedAt: sessionEndTime,
+        questionsAndFeedback: answersWithEnhancedFeedback.map((item, index) => ({
+          questionNumber: index + 1,
+          questionId: sessionQuestions[index]?.id || `q${index + 1}`,
+          questionText: item.question,
+          questionType: sessionQuestions[index]?.type || 'general',
+          questionDifficulty: sessionQuestions[index]?.difficulty || 'medium',
+          userAnswer: item.answer,
+          answerTimestamp: item.timestamp,
+          feedbackAnalysis: {
+            // Original API data
+            sentiment: item.feedback.sentiment,
+            clarityScore: item.feedback.clarity_score,
+            fillerWords: item.feedback.filler_words,
+            overallFeedback: item.feedback.overall_feedback,
+            
+            // Enhanced analysis
+            sentimentAnalysis: item.enhancedAnalysis.sentimentAnalysis,
+            clarityInsights: item.enhancedAnalysis.clarityInsights,
+            fillerAnalysis: item.enhancedAnalysis.fillerAnalysis,
+            
+            analysisTimestamp: sessionEndTime
+          }
+        })),
+        sessionMetrics: sessionMetrics,
+        lastUpdated: sessionEndTime
+      };
+
+      // Store both documents in Firebase
       if (user) {
+        // Store session in interview sessions collection
         const userRef = doc(db, "users", user.uid);
         const sessionsRef = collection(userRef, "interviewSessions");
         await addDoc(sessionsRef, sessionData);
+        
+        // Store feedback in new feedback collection with user ID as document ID
+        const feedbackRef = doc(db, "interviewFeedback", user.uid);
+        
+        // Check if feedback document exists and update or create
+        try {
+          const existingFeedback = await getDoc(feedbackRef);
+          if (existingFeedback.exists()) {
+            // Update existing document by adding new session feedback
+            await updateDoc(feedbackRef, {
+              [`sessions.${sessionData.sessionId}`]: feedbackData,
+              lastUpdated: sessionEndTime,
+              totalSessions: (existingFeedback.data().totalSessions || 0) + 1
+            });
+          } else {
+            // Create new feedback document
+            await setDoc(feedbackRef, {
+              userId: user.uid,
+              totalSessions: 1,
+              [`sessions.${sessionData.sessionId}`]: feedbackData,
+              createdAt: sessionEndTime,
+              lastUpdated: sessionEndTime
+            });
+          }
+        } catch (feedbackError) {
+          console.error('Error storing feedback:', feedbackError);
+          // Continue even if feedback storage fails
+        }
         
         // Update user document with latest session summary
         await updateDoc(userRef, {
@@ -207,20 +363,20 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
           totalInterviewSessions: (user.totalInterviewSessions || 0) + 1
         });
         
-        console.log('Session saved successfully:', sessionData.sessionId);
+        console.log('📊 Session and enhanced feedback stored successfully:', sessionData.sessionId);
       }
 
-      // Update the allFeedback state for the UI
-      setAllFeedback(finalAnswersWithFeedback);
+      // Update the UI state with enhanced feedback
+      setAllFeedback(answersWithEnhancedFeedback);
       setInterviewComplete(true);
       
       if (onComplete) {
-        onComplete(finalAnswersWithFeedback);
+        onComplete(answersWithEnhancedFeedback);
       }
       
     } catch (err) {
-      console.error("Error submitting interview:", err);
-      setError("Failed to submit interview. Please try again.");
+      console.error("❌ Error submitting interview:", err);
+      setError(`Failed to complete interview: ${err.message}. Please try again.`);
     } finally {
       setLoading(false);
     }
@@ -267,7 +423,7 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
               Interview Summary
             </h3>
             
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
               <div className="bg-blue-50 dark:bg-blue-900/20 p-4 rounded-lg">
                 <h4 className="font-medium text-blue-800 dark:text-blue-400">
                   Average Sentiment
@@ -276,6 +432,15 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
                   {allFeedback.length > 0 
                     ? Math.round(((allFeedback.reduce((sum, item) => sum + (item.feedback?.sentiment?.compound || 0), 0) / allFeedback.length) + 1) / 2 * 100)
                     : 0}%
+                </p>
+                <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">
+                  {allFeedback.length > 0 && allFeedback[0]?.enhancedAnalysis?.sentimentAnalysis?.mood 
+                    ? `Overall mood: ${allFeedback.reduce((prev, item) => {
+                        const compound = item.feedback?.sentiment?.compound || 0;
+                        return compound > prev.compound ? { mood: item.enhancedAnalysis?.sentimentAnalysis?.mood, compound } : prev;
+                      }, { mood: 'neutral', compound: -2 }).mood}`
+                    : 'Neutral tone'
+                  }
                 </p>
               </div>
               
@@ -288,6 +453,16 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
                     ? Math.round(allFeedback.reduce((sum, item) => sum + (item.feedback?.clarity_score || 0), 0) / allFeedback.length * 100)
                     : 0}%
                 </p>
+                <p className="text-xs text-green-600 dark:text-green-400 mt-1">
+                  {allFeedback.length > 0 && allFeedback[0]?.enhancedAnalysis?.clarityInsights?.level
+                    ? `Clarity: ${allFeedback.reduce((counts, item) => {
+                        const level = item.enhancedAnalysis?.clarityInsights?.level || 'fair';
+                        counts[level] = (counts[level] || 0) + 1;
+                        return counts;
+                      }, {})['excellent'] > 0 ? 'Excellent' : 'Good'}`
+                    : 'Good structure'
+                  }
+                </p>
               </div>
               
               <div className="bg-purple-50 dark:bg-purple-900/20 p-4 rounded-lg">
@@ -297,8 +472,78 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
                 <p className="text-2xl font-bold text-purple-900 dark:text-purple-300">
                   {allFeedback.length}
                 </p>
+                <p className="text-xs text-purple-600 dark:text-purple-400 mt-1">
+                  Complete session
+                </p>
+              </div>
+
+              <div className="bg-orange-50 dark:bg-orange-900/20 p-4 rounded-lg">
+                <h4 className="font-medium text-orange-800 dark:text-orange-400">
+                  Filler Words
+                </h4>
+                <p className="text-2xl font-bold text-orange-900 dark:text-orange-300">
+                  {allFeedback.reduce((sum, item) => sum + (item.enhancedAnalysis?.fillerAnalysis?.total || 0), 0)}
+                </p>
+                <p className="text-xs text-orange-600 dark:text-orange-400 mt-1">
+                  {allFeedback.length > 0 && allFeedback[0]?.enhancedAnalysis?.fillerAnalysis?.level
+                    ? `Level: ${allFeedback.reduce((prev, item) => {
+                        const total = item.enhancedAnalysis?.fillerAnalysis?.total || 0;
+                        return total > prev.total ? { level: item.enhancedAnalysis?.fillerAnalysis?.level, total } : prev;
+                      }, { level: 'excellent', total: -1 }).level}`
+                    : 'Good control'
+                  }
+                </p>
               </div>
             </div>
+
+            {/* Enhanced Insights Section */}
+            {allFeedback.length > 0 && allFeedback[0]?.enhancedAnalysis && (
+              <div className="mb-6 p-4 bg-gradient-to-r from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20 rounded-lg">
+                <h4 className="text-md font-semibold text-indigo-800 dark:text-indigo-400 mb-3">
+                  🎯 AI-Powered Interview Insights
+                </h4>
+                
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <h5 className="font-medium text-gray-800 dark:text-white mb-2">😊 Sentiment Analysis</h5>
+                    <div className="space-y-1 text-sm">
+                      {allFeedback.map((item, index) => {
+                        const analysis = item.enhancedAnalysis?.sentimentAnalysis;
+                        if (!analysis) return null;
+                        
+                        return (
+                          <div key={index} className="flex items-center space-x-2">
+                            <span className="w-2 h-2 rounded-full bg-indigo-400"></span>
+                            <span className="text-gray-700 dark:text-gray-300">
+                              Q{index + 1}: {analysis.mood} ({analysis.confidence} confidence)
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  
+                  <div>
+                    <h5 className="font-medium text-gray-800 dark:text-white mb-2">💡 Key Insights</h5>
+                    <div className="space-y-1 text-sm">
+                      {(() => {
+                        const allInsights = allFeedback.flatMap(item => 
+                          item.enhancedAnalysis?.sentimentAnalysis?.insights || []
+                        );
+                        const uniqueInsights = [...new Set(allInsights)].slice(0, 4);
+                        
+                        return uniqueInsights.map((insight, index) => (
+                          <div key={index} className="flex items-center space-x-2">
+                            <span className="w-2 h-2 rounded-full bg-purple-400"></span>
+                            <span className="text-gray-700 dark:text-gray-300">{insight}</span>
+                          </div>
+                        ));
+                      })()}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Detailed Feedback Display */}
             <div className="space-y-4">
@@ -314,11 +559,14 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
                     <strong>Your Answer:</strong> {item.answer}
                   </p>
                   
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-3">
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-3">
                     <div>
                       <p className="text-xs font-medium text-gray-500 dark:text-gray-400">Clarity Score</p>
                       <p className="text-lg font-semibold text-blue-600">
                         {Math.round((item.feedback?.clarity_score || 0) * 100)}%
+                      </p>
+                      <p className="text-xs text-blue-500">
+                        {item.enhancedAnalysis?.clarityInsights?.level || 'N/A'}
                       </p>
                     </div>
                     <div>
@@ -328,16 +576,79 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
                           ? Math.round(((item.feedback.sentiment.compound + 1) / 2) * 100)
                           : 50}%
                       </p>
+                      <p className="text-xs text-green-500">
+                        {item.enhancedAnalysis?.sentimentAnalysis?.mood || 'neutral'}
+                      </p>
                     </div>
                     <div>
                       <p className="text-xs font-medium text-gray-500 dark:text-gray-400">Filler Words</p>
                       <p className="text-lg font-semibold text-orange-600">
-                        {item.feedback?.filler_words 
-                          ? Object.values(item.feedback.filler_words).reduce((a, b) => a + b, 0)
-                          : 0}
+                        {item.enhancedAnalysis?.fillerAnalysis?.total || 0}
+                      </p>
+                      <p className="text-xs text-orange-500">
+                        {item.enhancedAnalysis?.fillerAnalysis?.level || 'good'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-medium text-gray-500 dark:text-gray-400">Confidence</p>
+                      <p className="text-lg font-semibold text-purple-600">
+                        {item.enhancedAnalysis?.sentimentAnalysis?.confidence || 'moderate'}
+                      </p>
+                      <p className="text-xs text-purple-500">
+                        {item.feedback?.sentiment?.pos > 0.3 ? 'high' : 'moderate'}
                       </p>
                     </div>
                   </div>
+                  
+                  {/* Enhanced Analysis Display */}
+                  {item.enhancedAnalysis && (
+                    <div className="mb-3 p-3 bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/10 dark:to-indigo-900/10 rounded-lg">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Sentiment Breakdown</p>
+                          <div className="flex space-x-2 text-xs">
+                            <span className="bg-green-100 text-green-700 px-2 py-1 rounded">
+                              Pos: {Math.round((item.feedback?.sentiment?.pos || 0) * 100)}%
+                            </span>
+                            <span className="bg-gray-100 text-gray-700 px-2 py-1 rounded">
+                              Neu: {Math.round((item.feedback?.sentiment?.neu || 0) * 100)}%
+                            </span>
+                            <span className="bg-red-100 text-red-700 px-2 py-1 rounded">
+                              Neg: {Math.round((item.feedback?.sentiment?.neg || 0) * 100)}%
+                            </span>
+                          </div>
+                        </div>
+                        
+                        {item.enhancedAnalysis.fillerAnalysis?.mostUsed?.length > 0 && (
+                          <div>
+                            <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Top Filler Words</p>
+                            <div className="flex space-x-2 text-xs">
+                              {item.enhancedAnalysis.fillerAnalysis.mostUsed.slice(0, 3).map((filler, idx) => (
+                                <span key={idx} className="bg-orange-100 text-orange-700 px-2 py-1 rounded">
+                                  {filler.word}: {filler.count}x
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      
+                      {/* Insights */}
+                      {item.enhancedAnalysis.sentimentAnalysis?.insights?.length > 0 && (
+                        <div className="mt-2">
+                          <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">AI Insights</p>
+                          <div className="space-y-1">
+                            {item.enhancedAnalysis.sentimentAnalysis.insights.slice(0, 2).map((insight, idx) => (
+                              <div key={idx} className="flex items-center space-x-2">
+                                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
+                                <span className="text-xs text-gray-600 dark:text-gray-400">{insight}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   
                   <div className="p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
                     <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">AI Feedback</p>
@@ -414,54 +725,13 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
         </div>
       </div>
 
-      {/* Feedback Display */}
-      {feedback && (
-        <div className="mb-6 p-4 border border-green-200 bg-green-50 dark:bg-green-900/20 rounded-lg">
-          <h4 className="font-semibold text-green-800 dark:text-green-400 mb-3">
-            ✅ Feedback for Current Answer
-          </h4>
-          
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-3">
-            <div>
-              <p className="text-xs font-medium text-gray-500 dark:text-gray-400">Clarity Score</p>
-              <p className="text-lg font-semibold text-blue-600">
-                {Math.round((feedback.clarity_score || 0) * 100)}%
-              </p>
-            </div>
-            <div>
-              <p className="text-xs font-medium text-gray-500 dark:text-gray-400">Sentiment</p>
-              <p className="text-lg font-semibold text-green-600">
-                {feedback.sentiment?.compound 
-                  ? Math.round(((feedback.sentiment.compound + 1) / 2) * 100)
-                  : 50}%
-              </p>
-            </div>
-            <div>
-              <p className="text-xs font-medium text-gray-500 dark:text-gray-400">Filler Words</p>
-              <p className="text-lg font-semibold text-orange-600">
-                {feedback.filler_words 
-                  ? Object.values(feedback.filler_words).reduce((a, b) => a + b, 0)
-                  : 0}
-              </p>
-            </div>
-          </div>
-          
-          <div className="p-3 bg-white dark:bg-gray-800 rounded-lg">
-            <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">AI Feedback</p>
-            <p className="text-sm text-gray-700 dark:text-gray-300">
-              {feedback.overall_feedback || "Great job on your answer!"}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* Loading State for Feedback */}
+      {/* Loading State for Interview Completion */}
       {loading && (
         <div className="mb-6 p-4 border border-blue-200 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
           <div className="flex items-center">
             <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600 mr-3"></div>
             <p className="text-blue-800 dark:text-blue-300">
-              🤖 Analyzing your answer and generating feedback...
+              🤖 Analyzing all your answers and generating comprehensive feedback...
             </p>
           </div>
         </div>
@@ -475,6 +745,29 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
           </p>
         </div>
       )}
+
+      {/* Progress Indicator */}
+      <div className="mb-6 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-blue-800 dark:text-blue-300 font-medium">
+              📝 Answers Collected: {answers.length} / {sessionQuestions.length}
+            </p>
+            <p className="text-blue-600 dark:text-blue-400 text-sm">
+              {answers.length === sessionQuestions.length 
+                ? "✅ All questions answered! Ready to generate feedback." 
+                : "Continue answering questions. Feedback will be generated at the end."}
+            </p>
+          </div>
+          {answers.length === sessionQuestions.length && (
+            <div className="text-green-600">
+              <svg className="w-8 h-8" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+              </svg>
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* Recorder Component */}
       <div className="mb-6">
