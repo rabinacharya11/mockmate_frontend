@@ -9,11 +9,20 @@ import InterviewFeedbackManager from "../components/InterviewFeedbackManager";
 import { redirect } from "next/navigation";
 
 export default function Dashboard() {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const [activeTab, setActiveTab] = useState("upload");
   const [skills, setSkills] = useState([]);
   const [questions, setQuestions] = useState([]);
   const [showInterview, setShowInterview] = useState(false);
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+      // Redirect will happen automatically via AuthContext
+    } catch (error) {
+      console.error("Logout failed:", error);
+    }
+  };
   
   if (!user) {
     // Redirect to home if not logged in
@@ -79,6 +88,15 @@ export default function Dashboard() {
               )}
               <span className="text-sm text-gray-700 dark:text-gray-300">{user.displayName}</span>
             </div>
+            <button
+              onClick={handleLogout}
+              className="inline-flex items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-colors"
+            >
+              <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
+              Logout
+            </button>
           </div>
         </div>
       </header>
