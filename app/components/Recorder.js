@@ -18,9 +18,58 @@ export default function Recorder({ question, onAnswerComplete, isLastQuestion, c
   const [audioStream, setAudioStream] = useState(null);
   const [useWebSpeechAPI, setUseWebSpeechAPI] = useState(false); // Start with false to avoid network issues
   const [isSubmitted, setIsSubmitted] = useState(false);
+  const [supportedMimeType, setSupportedMimeType] = useState('audio/webm');
+  const [debugInfo, setDebugInfo] = useState({});
   const { user } = useAuth();
 
-  // Initialize Speech Recognition
+  // Debug mode (can be enabled via localStorage)
+  const DEBUG_MODE = typeof window !== 'undefined' && localStorage.getItem('transcription_debug') === 'true';
+
+  // Detect browser capabilities
+  const detectBrowserCapabilities = () => {
+    // Detect best supported MIME type
+    const mimeTypes = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/mp4;codecs=mp4a.40.2',
+      'audio/mp4',
+      'audio/mpeg',
+      'audio/wav'
+    ];
+    
+    let bestMimeType = 'audio/webm'; // Default fallback
+    for (const mimeType of mimeTypes) {
+      if (MediaRecorder.isTypeSupported(mimeType)) {
+        bestMimeType = mimeType;
+        break;
+      }
+    }
+    
+    setSupportedMimeType(bestMimeType);
+    console.log('🎵 Best supported MIME type:', bestMimeType);
+    
+    // Detect browser for specific handling
+    const userAgent = navigator.userAgent;
+    const isChrome = userAgent.includes('Chrome');
+    const isFirefox = userAgent.includes('Firefox');
+    const isSafari = userAgent.includes('Safari') && !isChrome;
+    const isEdge = userAgent.includes('Edge');
+    
+    console.log('🌐 Browser detection:', { isChrome, isFirefox, isSafari, isEdge });
+    
+    // Store debug info
+    setDebugInfo({
+      mimeType: bestMimeType,
+      browser: { isChrome, isFirefox, isSafari, isEdge },
+      userAgent,
+      mediaRecorderSupported: typeof MediaRecorder !== 'undefined',
+      getUserMediaSupported: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
+    });
+    
+    return { bestMimeType, isChrome, isFirefox, isSafari, isEdge };
+  };
+
+  // Initialize Speech Recognition and detect browser capabilities
   useEffect(() => {
     const initializeSpeechRecognition = () => {
       try {
@@ -30,10 +79,13 @@ export default function Recorder({ question, onAnswerComplete, isLastQuestion, c
           return;
         }
 
+        // Detect browser capabilities
+        detectBrowserCapabilities();
+
         // Check for speech recognition support
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (!SpeechRecognition) {
-          setError("Speech recognition is not supported in your browser. Please use Chrome, Edge, or Safari.");
+          setError("Speech recognition is not supported in your browser. Please use Chrome, Edge, or Safari, or use the 'Text Answer' mode.");
           return;
         }
 
@@ -167,40 +219,85 @@ export default function Recorder({ question, onAnswerComplete, isLastQuestion, c
   const startMediaRecording = async () => {
     try {
       console.log('🎤 Starting audio recording...');
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          sampleRate: 44100
+        }
+      });
       setAudioStream(stream);
       
-      const recorder = new MediaRecorder(stream);
+      // Use the detected MIME type
+      const mimeType = supportedMimeType;
+      console.log('🎵 Using MIME type:', mimeType);
+      
+      const recorder = new MediaRecorder(stream, { 
+        mimeType: mimeType,
+        bitsPerSecond: 128000 // Set a reasonable bitrate
+      });
       const audioChunks = [];
       
       recorder.ondataavailable = (event) => {
-        audioChunks.push(event.data);
+        if (event.data.size > 0) {
+          audioChunks.push(event.data);
+          console.log('📦 Audio chunk received:', event.data.size, 'bytes');
+        }
       };
       
       recorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-        console.log('🎵 Audio recorded, blob size:', audioBlob.size);
+        const audioBlob = new Blob(audioChunks, { type: supportedMimeType });
+        console.log('🎵 Audio recorded, blob size:', audioBlob.size, 'bytes, type:', supportedMimeType);
+        
+        // Check if we have enough audio data
+        if (audioBlob.size < 1000) { // Less than 1KB
+          setError("❌ Recording too short. Please record for at least 2-3 seconds and try again.");
+          return;
+        }
         
         setError("🔄 Transcribing your audio with AssemblyAI... Please wait...");
         
         try {
           // Send audio to our transcription API
           const formData = new FormData();
-          formData.append('audio', audioBlob, 'recording.wav');
+          // Use the original MIME type as filename extension
+          const fileExtension = supportedMimeType.includes('webm') ? 'webm' : 
+                               supportedMimeType.includes('mp4') ? 'mp4' : 
+                               supportedMimeType.includes('wav') ? 'wav' : 
+                               supportedMimeType.includes('mpeg') ? 'mp3' : 'audio';
+          formData.append('audio', audioBlob, `recording.${fileExtension}`);
           
+          console.log('📤 Sending audio to transcription API...');
           const response = await fetch('/api/transcribe', {
             method: 'POST',
             body: formData,
           });
           
+          console.log('📥 Transcription API response status:', response.status);
           const result = await response.json();
+          console.log('📄 Transcription API result:', result);
           
-          if (result.transcript && result.transcript.trim()) {
+          if (response.ok && result.transcript && result.transcript.trim()) {
             setTranscript(result.transcript);
             setError("✅ Transcription completed! Your answer has been converted to text.");
             console.log('✅ Transcription successful:', result.transcript);
           } else {
-            setError("❌ Transcription failed. Please try recording again or use the 'Text Answer' mode.");
+            // Handle different types of errors
+            let errorMessage = "❌ Transcription failed. ";
+            if (result.error) {
+              if (result.error.includes('timeout')) {
+                errorMessage += "The transcription service timed out. Please try with a shorter recording.";
+              } else if (result.error.includes('network')) {
+                errorMessage += "Network error occurred. Please check your internet connection.";
+              } else if (result.error.includes('format')) {
+                errorMessage += "Audio format not supported. Please try recording again.";
+              } else {
+                errorMessage += result.message || result.error;
+              }
+            } else {
+              errorMessage += "Please try recording again or use the 'Text Answer' mode.";
+            }
+            setError(errorMessage);
             console.error('❌ Transcription failed:', result);
           }
         } catch (transcriptionError) {
@@ -210,9 +307,9 @@ export default function Recorder({ question, onAnswerComplete, isLastQuestion, c
       };
       
       setMediaRecorder(recorder);
-      recorder.start();
+      recorder.start(1000); // Collect data every second for better streaming
       setIsRecording(true);
-      setError("🎤 Recording audio... Click 'Stop Recording' when finished, and we'll automatically transcribe it using AssemblyAI!");
+      setError("🎤 Recording audio... Speak clearly and click 'Stop Recording' when finished. We'll automatically transcribe it using AssemblyAI!");
       
     } catch (err) {
       console.error('❌ MediaRecorder failed:', err);
@@ -547,6 +644,28 @@ export default function Recorder({ question, onAnswerComplete, isLastQuestion, c
       {loading && (
         <div className="flex justify-center">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+        </div>
+      )}
+
+      {/* Debug Panel - only shown when debug mode is enabled */}
+      {DEBUG_MODE && (
+        <div className="mt-4 p-4 bg-gray-100 border border-gray-300 rounded-lg">
+          <h4 className="font-bold text-gray-800 mb-2">🔧 Debug Information</h4>
+          <div className="text-xs text-gray-600 space-y-1">
+            <p><strong>MIME Type:</strong> {debugInfo.mimeType}</p>
+            <p><strong>Browser:</strong> {JSON.stringify(debugInfo.browser)}</p>
+            <p><strong>MediaRecorder Support:</strong> {debugInfo.mediaRecorderSupported ? '✅' : '❌'}</p>
+            <p><strong>getUserMedia Support:</strong> {debugInfo.getUserMediaSupported ? '✅' : '❌'}</p>
+            <p><strong>Browser Supported:</strong> {browserSupported ? '✅' : '❌'}</p>
+            <p><strong>Current Input Mode:</strong> {inputMode}</p>
+            <p><strong>Is Recording:</strong> {isRecording ? '✅' : '❌'}</p>
+            <p><strong>Retry Count:</strong> {retryCount}</p>
+            <p><strong>Transcript Length:</strong> {transcript.length} chars</p>
+            {error && <p><strong>Last Error:</strong> {error}</p>}
+          </div>
+          <div className="mt-2 text-xs text-gray-500">
+            To disable debug mode: <code>localStorage.removeItem(&apos;transcription_debug&apos;)</code>
+          </div>
         </div>
       )}
     </div>
