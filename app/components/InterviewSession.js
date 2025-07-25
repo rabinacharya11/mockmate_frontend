@@ -1,10 +1,12 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useAuth } from "../context/AuthContext";
 import { db } from "../lib/firebase";
-import { doc, updateDoc, arrayUnion, collection, addDoc, setDoc, getDoc } from "firebase/firestore";
-import { getVerbalFeedback, getMultipleVerbalFeedback } from "../lib/api";
+import { doc, setDoc, updateDoc, serverTimestamp, collection, addDoc, getDoc } from "firebase/firestore";
+import { getMultipleVerbalFeedback } from "../lib/api";
+import EyeTracker from "./EyeTracker";
 import Recorder from "./Recorder";
+import APITestButton from "./APITestButton";
 
 export default function InterviewSession({ questions = [], onComplete, onBack }) {
   // Ensure we always have exactly 5 questions
@@ -160,6 +162,26 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
     };
   };
 
+  // Helper function to create fallback feedback when API fails
+  const createFallbackFeedbackItem = (answer) => {
+    return {
+      question: answer.questionText,
+      answer: answer.answer,
+      feedback: {
+        sentiment: { pos: 0.5, neg: 0.1, neu: 0.4, compound: 0.4 },
+        clarity_score: 0.7,
+        filler_words: {},
+        overall_feedback: "Feedback analysis unavailable due to server error."
+      },
+      enhancedAnalysis: {
+        sentimentAnalysis: { mood: 'neutral', confidence: 'moderate', insights: ['Feedback temporarily unavailable'] },
+        clarityInsights: { level: 'fair', message: 'Analysis unavailable' },
+        fillerAnalysis: { total: 0, level: 'unknown', message: 'Analysis unavailable', mostUsed: [] }
+      },
+      timestamp: answer.timestamp || new Date()
+    };
+  };
+
   const submitInterview = async () => {
     setLoading(true);
     setError("");
@@ -175,49 +197,38 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
       
       console.log('📤 Generating feedback for all answers...');
       
-      // Generate feedback for all answers at once using the multiple feedback API
-      const feedbackResponse = await getMultipleVerbalFeedback(questionsAndAnswers);
+      let feedbackResponse;
+      let answersWithEnhancedFeedback;
       
-      if (!feedbackResponse || !feedbackResponse.feedback || !Array.isArray(feedbackResponse.feedback)) {
-        throw new Error('Invalid feedback response format');
-      }
-      
-      console.log('✅ Raw feedback response:', feedbackResponse);
-      
-      // Process the API response format and combine with enhanced analysis
-      const answersWithEnhancedFeedback = answers.map((answer, index) => {
-        const apiFeedback = feedbackResponse.feedback[index];
+      try {
+        // Generate feedback for all answers at once using the multiple feedback API
+        feedbackResponse = await getMultipleVerbalFeedback(questionsAndAnswers);
         
-        if (!apiFeedback) {
-          console.warn(`No feedback received for question ${index + 1}`);
-          return {
-            question: answer.questionText,
-            answer: answer.answer,
-            feedback: {
-              sentiment: { pos: 0.5, neg: 0.1, neu: 0.4, compound: 0.4 },
-              clarity_score: 0.7,
-              filler_words: {},
-              overall_feedback: "Feedback analysis unavailable."
-            },
-            enhancedAnalysis: {
-              sentimentAnalysis: { mood: 'neutral', confidence: 'moderate', insights: [] },
-              clarityInsights: { level: 'fair', message: 'Analysis unavailable' },
-              fillerAnalysis: { total: 0, level: 'unknown', message: 'Analysis unavailable', mostUsed: [] }
-            },
-            timestamp: answer.timestamp || new Date()
-          };
+        if (!feedbackResponse || !feedbackResponse.feedback || !Array.isArray(feedbackResponse.feedback)) {
+          throw new Error('Invalid feedback response format');
         }
         
-        // Use the actual API response format
-        const sentimentAnalysis = analyzeSentiment(apiFeedback.sentiment);
-        const clarityInsights = getClarityInsights(apiFeedback.clarity_score);
-        const fillerAnalysis = analyzeFillerWords(apiFeedback.filler_words);
+        console.log('✅ Raw feedback response:', feedbackResponse);
         
-        return {
-          question: apiFeedback.question || answer.questionText, // Use API question if available
-          answer: apiFeedback.answer || answer.answer, // Use API answer if available
-          feedback: {
-            sentiment: apiFeedback.sentiment,
+        // Process the API response format and combine with enhanced analysis
+        answersWithEnhancedFeedback = answers.map((answer, index) => {
+          const apiFeedback = feedbackResponse.feedback[index];
+          
+          if (!apiFeedback) {
+            console.warn(`No feedback received for question ${index + 1}`);
+            return createFallbackFeedbackItem(answer);
+          }
+          
+          // Use the actual API response format
+          const sentimentAnalysis = analyzeSentiment(apiFeedback.sentiment);
+          const clarityInsights = getClarityInsights(apiFeedback.clarity_score);
+          const fillerAnalysis = analyzeFillerWords(apiFeedback.filler_words);
+          
+          return {
+            question: apiFeedback.question || answer.questionText,
+            answer: apiFeedback.answer || answer.answer,
+            feedback: {
+              sentiment: apiFeedback.sentiment,
             clarity_score: apiFeedback.clarity_score,
             filler_words: apiFeedback.filler_words,
             overall_feedback: apiFeedback.overall_feedback
@@ -232,6 +243,16 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
       });
       
       console.log('✅ Enhanced feedback generated for all answers:', answersWithEnhancedFeedback.length);
+      
+      } catch (feedbackError) {
+        console.error('❌ Feedback API failed, using fallback analysis:', feedbackError);
+        
+        // Create fallback feedback for all answers when API fails
+        answersWithEnhancedFeedback = answers.map(answer => createFallbackFeedbackItem(answer));
+        
+        // Show a warning but continue with the interview completion
+        setError("⚠️ Feedback analysis temporarily unavailable, but your interview has been saved with basic analysis.");
+      }
       
       // Calculate comprehensive session metrics
       const sessionEndTime = new Date();
@@ -682,6 +703,9 @@ export default function InterviewSession({ questions = [], onComplete, onBack })
 
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 max-w-4xl mx-auto">
+      {/* API Test Button - only shown in development */}
+      <APITestButton />
+      
       {/* Progress Bar */}
       <div className="mb-6">
         <div className="flex justify-between items-center mb-2">

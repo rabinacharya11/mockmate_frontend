@@ -371,6 +371,7 @@ export async function getVerbalFeedback(questionText, voiceConvertedToText) {
 export async function getMultipleVerbalFeedback(questionsAndAnswers) {
   try {
     logger.info('Getting verbal feedback for multiple questions from FastAPI backend');
+    console.log('📤 Sending questions and answers:', questionsAndAnswers);
     
     // Format request data according to the new API specification
     const requestData = questionsAndAnswers.map(qa => ({
@@ -378,42 +379,70 @@ export async function getMultipleVerbalFeedback(questionsAndAnswers) {
       voiceConvertedToText: qa.voiceConvertedToText
     }));
     
+    console.log('📋 Formatted request data:', requestData);
+    
     const apiUrl = config.api.baseUrl || "/api/proxy";
+    const fullUrl = `${apiUrl}/verbal-feedback`;
+    
+    console.log('🔗 Making request to:', fullUrl);
     
     // Use axios for the request
-    const response = await axios.post(`${apiUrl}/verbal-feedback`, requestData, {
-      headers: { 'Content-Type': 'application/json' }
-      // No timeout - let it take as long as needed for AI analysis
+    const response = await axios.post(fullUrl, requestData, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 60000 // 60 second timeout
     });
+    
+    console.log('📥 Response status:', response.status);
+    console.log('📄 Response data:', response.data);
     
     const result = response.data;
     
     // Validate response format according to API specification
     if (result && result.feedback && Array.isArray(result.feedback)) {
+      console.log('✅ Valid response format received');
       return result;
     } else {
+      console.error('❌ Invalid response format:', result);
       logger.warn('Multiple verbal feedback API returned unexpected format');
       throw new Error('Invalid response format from verbal feedback API');
     }
   } catch (error) {
+    console.error('❌ Multiple verbal feedback API failed:', error);
     logger.error('Multiple verbal feedback API failed:', error.message);
     
-    // Check for specific error types and provide helpful error messages
+    // Enhanced error handling with more specific messages
     if (error.code === 'ECONNREFUSED' || error.message.includes('Network Error')) {
+      console.error('🔌 Connection refused - backend may not be running');
       throw new Error('Cannot connect to API server. Please ensure the backend is running on localhost:8000');
     }
     
-    if (error.code === 'ECONNABORTED') {
-      throw new Error('Request timed out. Please try again.');
+    if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+      console.error('⏰ Request timed out');
+      throw new Error('Request timed out. The analysis is taking too long. Please try again.');
     }
     
     if (error.response?.status === 422) {
+      console.error('📝 Invalid data format (422):', error.response.data);
       throw new Error('Invalid data format. Please check your question and answer data.');
     }
     
     if (error.response?.status === 500) {
+      console.error('🚨 Server error (500):', error.response.data);
       throw new Error('Server error occurred during feedback analysis. Please try again.');
     }
+    
+    if (error.response?.status === 404) {
+      console.error('❓ Endpoint not found (404)');
+      throw new Error('Feedback service endpoint not found. Please check backend configuration.');
+    }
+    
+    // Log the full error details for debugging
+    console.error('🔍 Full error details:', {
+      message: error.message,
+      status: error.response?.status,
+      data: error.response?.data,
+      code: error.code
+    });
     
     // Re-throw the error to force the frontend to handle it
     throw new Error(`Verbal feedback failed: ${error.message}`);
